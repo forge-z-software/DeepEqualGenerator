@@ -3,6 +3,7 @@ name: Build and verify
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,8 +19,11 @@ jobs:
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.x
-      - run: dotnet build DeepEqual.Generator.sln -c Release
+      - run: dotnet restore DeepEqual.Generator.sln -warnaserror:NU1901,NU1902,NU1903,NU1904
+      - run: dotnet build DeepEqual.Generator.sln -c Release --no-restore
       - run: dotnet test DeepEqual.Generator.Tests/DeepEqual.Generator.Tests.csproj -c Release --no-build
       - run: dotnet pack DeepEqual.Generator.Shared/DeepEqual.Generator.Shared.csproj -c Release --no-build -o artifacts/packages
       - run: dotnet restore samples/OrderComparison/OrderComparison.csproj --source artifacts/packages --packages artifacts/smoke-cache
       - run: dotnet run --project samples/OrderComparison/OrderComparison.csproj -c Release --no-restore
+      - run: dotnet restore samples/DeltaRoundTrip/DeltaRoundTrip.csproj --source artifacts/packages --packages artifacts/smoke-cache
+      - run: dotnet run --project samples/DeltaRoundTrip/DeltaRoundTrip.csproj -c Release --no-restore

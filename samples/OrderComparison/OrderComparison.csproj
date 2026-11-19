@@ -8,6 +8,6 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="DeepEqual.Generator" Version="2.0.0-preview.1" />
+    <PackageReference Include="DeepEqual.Generator" Version="2.0.0" />
   </ItemGroup>
 </Project>

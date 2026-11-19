@@ -204,7 +204,7 @@ public sealed class DeepOpsGenerator : IIncrementalGenerator
                 {
                     if (GenCommon.EnumerateAllTypeParameters(type).Any())
                     {
-                        spc.ReportDiagnostic(Diagnostic.Create(Diagnostics.EQ005, loc, "experimental diffs or deltas", type));
+                        spc.ReportDiagnostic(Diagnostic.Create(Diagnostics.EQ005, loc, "diffs or deltas for an open generic root", type));
                         continue;
                     }
 

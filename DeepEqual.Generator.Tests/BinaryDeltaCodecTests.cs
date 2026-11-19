@@ -484,7 +484,8 @@ public class BinaryDeltaCodecTests
     private static DeltaOp CreateRandomOp(Random rng, int depth, int maxDepth)
     {
         var memberIndex = rng.Next(0, 512);
-        var kind = (DeltaKind)rng.Next(Enum.GetValues<DeltaKind>().Length);
+        var kinds = Enum.GetValues<DeltaKind>();
+        var kind = kinds[rng.Next(kinds.Length)];
         var index = -1;
         object? key = null;
         object? value = null;

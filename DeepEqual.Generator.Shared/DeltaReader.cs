@@ -17,6 +17,14 @@ public struct DeltaReader(DeltaDocument? doc)
         return CollectionsMarshal.AsSpan(_doc.Ops);
     }
 
+    public void RequireRoot<T>() => RequireRoot(typeof(T));
+
+    internal void RequireRoot(Type type)
+    {
+        if (_doc.RootType is { } declared && declared != type)
+            throw new InvalidOperationException($"Delta for '{declared}' cannot be applied to '{type}'.");
+    }
+
     public bool TryRead(out DeltaOp op)
     {
         if (_pos < _doc.Ops.Count)

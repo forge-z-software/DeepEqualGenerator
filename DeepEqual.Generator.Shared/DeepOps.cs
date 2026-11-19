@@ -60,12 +60,12 @@ namespace DeepEqual
         public static DeltaDocument ComputeDelta(object? a, object? b, ComparisonOptions? opts = null)
         {
             var ctx = opts is null ? new ComparisonContext() : new ComparisonContext(opts);
-            var doc = new DeltaDocument();
+            var ta = a?.GetType();
+            var doc = DeltaDocument.ForRoot(ta);
             var w = new DeltaWriter(doc);
 
             if (ReferenceEquals(a, b)) return doc;
 
-            var ta = a?.GetType();
             var tb = b?.GetType();
             if (ta is null || tb is null || !ReferenceEquals(ta, tb))
             {
@@ -82,6 +82,7 @@ namespace DeepEqual
         public static void ApplyDelta(ref object? target, DeltaDocument delta, ComparisonOptions? opts = null)
         {
             var reader = new DeltaReader(delta);
+            if (target is not null) reader.RequireRoot(target.GetType());
             var operations = reader.AsSpan();
             if (operations.IsEmpty) return;
             if (operations.Length == 1 && operations[0].Kind == DeltaKind.ReplaceObject)

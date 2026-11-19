@@ -460,6 +460,8 @@ public static class DeltaHelpers
             return;
         }
 
+        if (ReplaceAmbiguousList(left, right, memberIndex, ref writer)) return;
+
         var leftList = left;
         var rightList = right;
 
@@ -607,6 +609,8 @@ public static class DeltaHelpers
             writer.WriteSetMember(memberIndex, right);
             return;
         }
+
+        if (ReplaceAmbiguousList(left, right, memberIndex, ref writer)) return;
 
         int na = left.Count;
         int nb = right.Count;
@@ -762,6 +766,8 @@ public static class DeltaHelpers
             return;
         }
 
+        if (ReplaceAmbiguousList(left, right, memberIndex, ref writer)) return;
+
         var la = left.Count;
         var lb = right.Count;
 
@@ -837,6 +843,30 @@ public static class DeltaHelpers
         }
     }
 
+    private static bool ReplaceAmbiguousList<T>(IList<T> left, IList<T> right, int memberIndex, ref DeltaWriter writer)
+    {
+        if (left.Count == right.Count) return false;
+
+        // A positional insertion cannot distinguish an existing duplicate from one already applied.
+        var values = new HashSet<T>();
+        if (IsDistinct(left, values))
+        {
+            values.Clear();
+            if (IsDistinct(right, values)) return false;
+        }
+
+        writer.WriteSetMember(memberIndex, new List<T>(right));
+        return true;
+
+        static bool IsDistinct(IList<T> list, HashSet<T> seen)
+        {
+            for (var i = 0; i < list.Count; i++)
+                if (list[i] is not { } value || !seen.Add(value)) return false;
+
+            return true;
+        }
+    }
+
     // =============================
     // LIST DELTA (keyed / order-insensitive)
     // =============================
@@ -864,9 +894,12 @@ public static class DeltaHelpers
         for (int i = 0; i < leftCount; i++)
         {
             var value = left[i];
-            var key = keySelector(value);
+            if (value is null || keySelector(value) is not { } key || !leftLookup.TryAdd(key, (i, value)))
+            {
+                writer.WriteSetMember(memberIndex, new List<T>(right));
+                return;
+            }
             leftOrder[i] = key;
-            leftLookup[key] = (i, value);
         }
 
         var rightKeys = rightCount == 0 ? Array.Empty<TKey>() : new TKey[rightCount];
@@ -874,15 +907,37 @@ public static class DeltaHelpers
 
         for (int i = 0; i < rightCount; i++)
         {
-            var key = keySelector(right[i]);
+            var value = right[i];
+            if (value is null || keySelector(value) is not { } key || !rightKeySet.Add(key))
+            {
+                writer.WriteSetMember(memberIndex, new List<T>(right));
+                return;
+            }
             rightKeys[i] = key;
-            rightKeySet.Add(key);
         }
 
         var elementComparer = new ListElementComparer<T>(context);
 
-        // Removals (preserve original ordering)
-        for (int i = 0; i < leftOrder.Length; i++)
+        var membershipChanged = leftCount != rightCount;
+        if (!membershipChanged)
+            foreach (var key in leftOrder)
+                if (!rightKeySet.Contains(key))
+                {
+                    membershipChanged = true;
+                    break;
+                }
+
+        // Position-based operations are ambiguous if a changed key also moves during insertion or removal.
+        if (membershipChanged)
+            for (var i = 0; i < rightCount; i++)
+                if (leftLookup.TryGetValue(rightKeys[i], out var entry) && entry.Index != i &&
+                    !elementComparer.AreEqual(entry.Value, right[i]))
+                {
+                    writer.WriteSetMember(memberIndex, new List<T>(right));
+                    return;
+                }
+
+        for (int i = leftOrder.Length - 1; i >= 0; i--)
         {
             var key = leftOrder[i];
             if (!rightKeySet.Contains(key))

@@ -683,11 +683,8 @@ public sealed class DirtyTrackTests
         ComparisonContext? ctx = validate ? new ComparisonContext(new ComparisonOptions { ValidateDirtyOnEmit = true }) : null;
         var delta = Delta(baseline, mutated, ctx);
 
-        var adds = EnumerateDeep(delta)
-            .Where(op => op.Kind == DeltaKind.SeqAddAt)
-            .ToList();
-        Assert.True(adds.Any(op => op.Index == 2), JsonConvert.SerializeObject(adds));
-        Assert.Single(adds.Where(op => op.Index == 2));
+        Assert.Contains(EnumerateDeep(delta), op => op.MemberIndex == DirtyTrackedModel.__Bit_Numbers &&
+            op.Kind == DeltaKind.SetMember);
 
         var target = baseline.Clone();
         target = target.ApplyDeepDelta(delta)!;

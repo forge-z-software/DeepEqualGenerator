@@ -9,25 +9,33 @@ using System.Text;
 namespace DeepEqual.Generator.Shared;
 
 /// <summary>Lossless binary codec for <see cref="DeltaDocument" />.</summary>
-/// <summary>Lossless binary codec for <see cref="DeltaDocument" />.</summary>
 public static class BinaryDeltaCodec
 {
+    private static readonly Encoding Utf8 = new UTF8Encoding(false, true);
+
     public static void Write(DeltaDocument doc, IBufferWriter<byte> output, BinaryDeltaOptions? options = null)
     {
-        new Writer(output, options ?? BinaryDeltaOptions.Default).WriteDocument(doc);
+        ArgumentNullException.ThrowIfNull(doc);
+        new Writer(output, ValidateOptions(options)).WriteDocument(doc);
     }
 
-    public static DeltaDocument Read(ReadOnlySpan<byte> data, BinaryDeltaOptions? options = null)
+    public static DeltaDocument Read(ReadOnlySpan<byte> data, BinaryDeltaOptions? options = null) =>
+        new Reader(data, ValidateOptions(options)).ReadDocument();
+
+    private static BinaryDeltaOptions ValidateOptions(BinaryDeltaOptions? options)
     {
-        return new Reader(data, options ?? BinaryDeltaOptions.Default).ReadDocument();
+        var profile = options ?? BinaryDeltaOptions.Default;
+        if (profile.Safety.MaxOps < 0 || profile.Safety.MaxStringBytes < 0 ||
+            profile.Safety.MaxNesting is < 0 or > 256 ||
+            (!profile.IncludeHeader && profile.StableTypeFingerprint != 0))
+            throw new ArgumentException("Invalid BinaryDelta limits or header settings.", nameof(options));
+        return profile;
     }
 
-    private static int AddAndReturnIndex(this List<string> list, string s)
-    {
-        var idx = list.Count;
-        list.Add(s);
-        return idx;
-    }
+    private static bool IsKnownOperation(DeltaKind kind) =>
+        kind is DeltaKind.ReplaceObject or DeltaKind.SetMember or DeltaKind.NestedMember or
+            DeltaKind.SeqReplaceAt or DeltaKind.SeqAddAt or DeltaKind.SeqRemoveAt or DeltaKind.SeqNestedAt or
+            DeltaKind.DictSet or DeltaKind.DictRemove or DeltaKind.DictNested;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void WriteGuid16(ref SpanWriter sw, in Guid g)
@@ -124,9 +132,9 @@ public static class BinaryDeltaCodec
 
         public void WriteDocument(DeltaDocument doc)
         {
+            ScanDocument(doc);
             if (_opt.IncludeHeader)
             {
-                BuildTablesIfNeeded(doc);
 
                 var sw = new SpanWriter(_out);
 
@@ -570,7 +578,7 @@ public static class BinaryDeltaCodec
                 return;
             }
 
-            sw.WriteVarUInt((uint)TypeSpecKind.Object);
+            throw new NotSupportedException($"BinaryDelta does not support container element type '{t}'.");
         }
 
         private static bool TryWriteKnownTypeSpec(ref SpanWriter sw, Type t)
@@ -635,16 +643,29 @@ public static class BinaryDeltaCodec
 
         private readonly record struct TypeEntry(string FullName, string AssemblySimpleName, Guid Mvid);
 
-        private void BuildTablesIfNeeded(DeltaDocument doc)
+        private void ScanDocument(DeltaDocument doc)
         {
-            if (!_opt.IncludeHeader) return;
-
             var includeEnumIdentity = _opt.IncludeEnumTypeIdentity;
-            HashSet<Type>? enumTypes = includeEnumIdentity && _opt.UseTypeTable ? new HashSet<Type>() : null;
-            var counts = _opt.UseStringTable ? new Dictionary<string, int>() : null;
+            var limits = _opt.Safety;
+            HashSet<Type>? enumTypes = _opt.IncludeHeader && includeEnumIdentity && _opt.UseTypeTable
+                ? new HashSet<Type>()
+                : null;
+            var counts = _opt.IncludeHeader && _opt.UseStringTable ? new Dictionary<string, int>() : null;
+
+            void RequireDepth(int depth)
+            {
+                if (depth > limits.MaxNesting) throw new InvalidOperationException("Max nesting exceeded.");
+            }
+
+            void RequireCount(int count)
+            {
+                if (count > limits.MaxOps) throw new InvalidOperationException("Bound exceeded.");
+            }
 
             void CountString(string s)
             {
+                if (Utf8.GetByteCount(s) > limits.MaxStringBytes)
+                    throw new InvalidOperationException("String bound exceeded.");
                 if (counts is null) return;
 
                 if (counts.TryGetValue(s, out var c))
@@ -653,53 +674,70 @@ public static class BinaryDeltaCodec
                     counts[s] = 1;
             }
 
-            void VisitValue(object? v)
+            void VisitValue(object? v, int nesting)
             {
-                if (v is null) return;
-
                 switch (v)
                 {
+                    case null:
+                        return;
                     case string s:
                         CountString(s);
                         return;
-                    case Array { Rank: 1 } a:
-                        for (var i = 0; i < a.Length; i++) VisitValue(a.GetValue(i));
-
+                    case byte[] bytes:
+                        if (bytes.Length > limits.MaxStringBytes)
+                            throw new InvalidOperationException("Byte array bound exceeded.");
+                        return;
+                    case Array array:
+                        RequireDepth(nesting);
+                        if (array.Rank != 1 || array.GetLowerBound(0) != 0)
+                            throw new NotSupportedException("BinaryDelta supports zero-based one-dimensional arrays.");
+                        RequireCount(array.Length);
+                        foreach (var item in array) VisitValue(item, nesting + 1);
                         return;
                     case IList list:
-                        for (var i = 0; i < list.Count; i++) VisitValue(list[i]);
-
+                        RequireDepth(nesting);
+                        RequireCount(list.Count);
+                        foreach (var item in list) VisitValue(item, nesting + 1);
                         return;
-                    case IDictionary dict:
-                        foreach (DictionaryEntry e in dict)
+                    case IDictionary dictionary:
+                        RequireDepth(nesting);
+                        RequireCount(dictionary.Count);
+                        foreach (DictionaryEntry entry in dictionary)
                         {
-                            VisitValue(e.Key);
-                            VisitValue(e.Value);
+                            VisitValue(entry.Key, nesting + 1);
+                            VisitValue(entry.Value, nesting + 1);
                         }
-
                         return;
                 }
 
                 var t = v.GetType();
-                if (includeEnumIdentity && t.IsEnum) enumTypes?.Add(t);
-            }
-
-            void WalkDoc(DeltaDocument d)
-            {
-                foreach (var op in d.Operations)
+                if (includeEnumIdentity && t.IsEnum)
                 {
-                    if (op.Key is string ks)
-                        CountString(ks);
-                    else
-                        VisitValue(op.Key);
-
-                    VisitValue(op.Value);
-
-                    if (op.Nested is not null) WalkDoc(op.Nested);
+                    if (Utf8.GetByteCount(t.FullName ?? t.Name) > limits.MaxStringBytes ||
+                        Utf8.GetByteCount(t.Assembly.GetName().Name ?? "") > limits.MaxStringBytes)
+                        throw new InvalidOperationException("Enum type identity bound exceeded.");
+                    enumTypes?.Add(t);
                 }
             }
 
-            WalkDoc(doc);
+            void WalkDoc(DeltaDocument d, int nesting)
+            {
+                RequireDepth(nesting);
+                RequireCount(d.Operations.Count);
+                foreach (var op in d.Operations)
+                {
+                    if (!IsKnownOperation(op.Kind)) throw new InvalidOperationException("Unknown delta operation.");
+                    if (op.Kind is DeltaKind.SeqAddAt or DeltaKind.SeqRemoveAt or DeltaKind.SeqReplaceAt or DeltaKind.SeqNestedAt && op.Index < 0)
+                        throw new InvalidOperationException("Sequence index must be nonnegative.");
+                    VisitValue(op.Key, nesting + 1);
+                    VisitValue(op.Value, nesting + 1);
+
+                    if (op.Kind is DeltaKind.NestedMember or DeltaKind.DictNested or DeltaKind.SeqNestedAt)
+                        WalkDoc(op.Nested ?? throw new InvalidOperationException("Missing nested document."), nesting + 1);
+                }
+            }
+
+            WalkDoc(doc, 0);
 
             if (counts is { Count: > 0 })
             {
@@ -720,7 +758,9 @@ public static class BinaryDeltaCodec
                 }
             }
 
-            if (includeEnumIdentity && enumTypes is { Count: > 0 })
+            RequireCount(_strings?.Count ?? 0);
+            RequireCount(enumTypes?.Count ?? 0);
+            if (enumTypes is { Count: > 0 })
             {
                 _typeToId = new Dictionary<Type, int>(enumTypes.Count);
                 _types = new List<TypeEntry>(enumTypes.Count);
@@ -731,14 +771,6 @@ public static class BinaryDeltaCodec
                     var asm = t.Assembly.GetName().Name ?? "";
                     var mvid = t.Module.ModuleVersionId;
                     _types.Add(new TypeEntry(t.FullName ?? t.Name, asm, mvid));
-
-                    if (_strToId is not null)
-                    {
-                        if (!_strToId.ContainsKey(t.FullName ?? t.Name))
-                            _strToId[t.FullName ?? t.Name] = _strings!.AddAndReturnIndex(t.FullName ?? t.Name);
-
-                        if (!_strToId.ContainsKey(asm)) _strToId[asm] = _strings!.AddAndReturnIndex(asm);
-                    }
                 }
             }
         }
@@ -814,14 +846,18 @@ public static class BinaryDeltaCodec
                 if (version != 1)
                     throw new NotSupportedException($"Unsupported BinaryDelta version {version}.");
 
-                _ = sr.ReadVarUInt();
+                var fingerprint = sr.ReadVarUInt();
+                if (_opt.StableTypeFingerprint != 0 && _opt.StableTypeFingerprint != fingerprint)
+                    throw new InvalidOperationException("BinaryDelta schema fingerprint mismatch.");
                 var flags = sr.ReadByte();
+                if ((flags & ~0b11) != 0) throw new InvalidOperationException("Unknown BinaryDelta header flags.");
                 var hasStrings = (flags & 0b01) != 0;
                 var hasTypes = (flags & 0b10) != 0;
 
                 if (hasStrings)
                 {
                     var n = (int)sr.ReadVarUIntChecked(_opt.Safety.MaxOps);
+                    sr.RequireBytes(n);
                     _strings = new string[n];
                     for (var i = 0; i < n; i++)
                         _strings[i] = sr.ReadUtf8StringInlineChecked(_opt.Safety.MaxStringBytes);
@@ -830,6 +866,7 @@ public static class BinaryDeltaCodec
                 if (hasTypes)
                 {
                     var n = (int)sr.ReadVarUIntChecked(_opt.Safety.MaxOps);
+                    sr.RequireBytes((long)n * 18);
                     _enumTypes = new Type[n];
                     for (var i = 0; i < n; i++)
                         _enumTypes[i] = ReadTypeEntry(ref sr);
@@ -837,6 +874,7 @@ public static class BinaryDeltaCodec
             }
 
             var opCount = (int)sr.ReadVarUIntChecked(_opt.Safety.MaxOps);
+            sr.RequireBytes((long)opCount * 2);
 
             var doc = new DeltaDocument();
             doc.Ops.Capacity = Math.Max(doc.Ops.Capacity, opCount);
@@ -845,7 +883,7 @@ public static class BinaryDeltaCodec
             for (var i = 0; i < opCount; i++)
                 ops.Add(ReadOp(ref sr));
 
-            _data = sr.Remaining;
+            if (!sr.Remaining.IsEmpty) throw new InvalidOperationException("Trailing bytes after the delta document.");
             return doc;
         }
 
@@ -855,6 +893,7 @@ public static class BinaryDeltaCodec
                 throw new InvalidOperationException("Max nesting exceeded");
 
             var count = (int)sr.ReadVarUIntChecked(_opt.Safety.MaxOps);
+            sr.RequireBytes((long)count * 2);
 
             var doc = new DeltaDocument();
             doc.Ops.Capacity = Math.Max(doc.Ops.Capacity, count);
@@ -870,6 +909,24 @@ public static class BinaryDeltaCodec
         private object? ReadValue(ref SpanReader sr)
         {
             var tag = (VTag)sr.ReadByte();
+            if (tag is VTag.Array or VTag.List or VTag.Dictionary)
+            {
+                if (++_nesting > _opt.Safety.MaxNesting)
+                    throw new InvalidOperationException("Max nesting exceeded.");
+                try
+                {
+                    return tag switch
+                    {
+                        VTag.Array => ReadArray(ref sr),
+                        VTag.List => ReadList(ref sr),
+                        _ => ReadDict(ref sr)
+                    };
+                }
+                finally
+                {
+                    _nesting--;
+                }
+            }
 
             switch (tag)
             {
@@ -902,10 +959,8 @@ public static class BinaryDeltaCodec
                 case VTag.StringInline: return sr.ReadUtf8StringInlineChecked(_opt.Safety.MaxStringBytes);
                 case VTag.StringRef:
                 {
-                    var sid = (int)sr.ReadVarUIntChecked(_strings?.Length ?? 0);
-                    if (_strings is null) throw new InvalidOperationException("No string table in stream.");
-
-                    return _strings[sid];
+                    if (_strings is not { Length: > 0 }) throw new InvalidOperationException("No string table in stream.");
+                    return _strings[sr.ReadVarUIntChecked(_strings.Length - 1)];
                 }
 
                 case VTag.Guid16:
@@ -933,14 +988,11 @@ public static class BinaryDeltaCodec
                 case VTag.ByteArray:
                 {
                     var len = (int)sr.ReadVarUIntChecked(_opt.Safety.MaxStringBytes);
+                    sr.RequireBytes(len);
                     var bytes = new byte[len];
                     sr.ReadBytes(bytes);
                     return bytes;
                 }
-
-                case VTag.Array: return ReadArray(ref sr);
-                case VTag.List: return ReadList(ref sr);
-                case VTag.Dictionary: return ReadDict(ref sr);
 
                 default:
                     throw new InvalidOperationException($"Unknown value tag: {tag}");
@@ -960,6 +1012,7 @@ public static class BinaryDeltaCodec
         {
             var elem = ReadTypeSpec(ref sr);
             var len = (int)sr.ReadVarUIntChecked(_opt.Safety.MaxOps);
+            sr.RequireBytes(len);
 
             if (TryCreateArray(elem, len, out var arr, out var objecty))
             {
@@ -973,16 +1026,14 @@ public static class BinaryDeltaCodec
                 return arr;
             }
 
-            var o = new object?[len];
-            for (var i = 0; i < len; i++) o[i] = ReadValue(ref sr);
-
-            return o;
+            throw new NotSupportedException($"BinaryDelta cannot construct an array of '{elem}' in this runtime.");
         }
 
         private object ReadList(ref SpanReader sr)
         {
             var elem = ReadTypeSpec(ref sr);
             var len = (int)sr.ReadVarUIntChecked(_opt.Safety.MaxOps);
+            sr.RequireBytes(len);
             var list = CreateList(elem, len);
             var il = (IList)list;
             for (var i = 0; i < len; i++) il.Add(ConvertValueForElement(ReadValue(ref sr), elem));
@@ -995,13 +1046,16 @@ public static class BinaryDeltaCodec
             var keyT = ReadTypeSpec(ref sr);
             var valT = ReadTypeSpec(ref sr);
             var len = (int)sr.ReadVarUIntChecked(_opt.Safety.MaxOps);
+            sr.RequireBytes((long)len * 2);
             var dict = CreateDictionary(keyT, valT, len);
             var id = (IDictionary)dict;
             for (var i = 0; i < len; i++)
             {
                 var k = ConvertValueForElement(ReadValue(ref sr), keyT);
                 var v = ConvertValueForElement(ReadValue(ref sr), valT);
-                id[k!] = v;
+                if (k is null || id.Contains(k))
+                    throw new InvalidOperationException("BinaryDelta dictionary contains a null or duplicate key.");
+                id.Add(k, v);
             }
 
             return dict;
@@ -1038,9 +1092,9 @@ public static class BinaryDeltaCodec
             {
                 return Activator.CreateInstance(typeof(List<>).MakeGenericType(t), capacity)!;
             }
-            catch
+            catch (Exception error) when (error is ArgumentException or MissingMethodException or NotSupportedException)
             {
-                return new List<object?>(capacity);
+                throw new NotSupportedException($"BinaryDelta cannot construct a list of '{t}' in this runtime.", error);
             }
         }
 
@@ -1050,20 +1104,18 @@ public static class BinaryDeltaCodec
             {
                 return Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(kt, vt), capacity)!;
             }
-            catch
+            catch (Exception error) when (error is ArgumentException or MissingMethodException or NotSupportedException)
             {
-                return new Dictionary<object, object?>(capacity);
+                throw new NotSupportedException($"BinaryDelta cannot construct a dictionary of '{kt}' and '{vt}' in this runtime.", error);
             }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static object? ConvertValueForElement(object? val, Type target)
         {
-            if (val is null || target == typeof(object)) return val;
+            if (val is null ? !target.IsValueType : target.IsInstanceOfType(val)) return val;
 
-            if (target.IsInstanceOfType(val)) return val;
-
-            return Convert.ChangeType(val, target);
+            throw new InvalidOperationException($"BinaryDelta value is incompatible with '{target}'.");
         }
 
         private (Type enumType, Type underlying) ReadEnumTypeIdentity(ref SpanReader sr)
@@ -1074,7 +1126,7 @@ public static class BinaryDeltaCodec
                 case TypeSpecKind.Enum:
                     if (_opt.IncludeHeader && _enumTypes is { Length: > 0 })
                     {
-                        var tid = (int)sr.ReadVarUIntChecked(_enumTypes.Length);
+                        var tid = (int)sr.ReadVarUIntChecked(_enumTypes.Length - 1);
                         var t = _enumTypes[tid];
                         return (t, Enum.GetUnderlyingType(t));
                     }
@@ -1084,15 +1136,18 @@ public static class BinaryDeltaCodec
                         var asm = sr.ReadUtf8StringInlineChecked(_opt.Safety.MaxStringBytes);
                         var mvid = ReadGuid16(ref sr);
 
-                        var t = ResolveType(full, asm, mvid) ??
-                                throw new TypeLoadException(
-                                    $"Enum type '{full}' not found in assembly '{asm}' ({mvid}).");
+                        var t = ResolveEnumType(full, asm, mvid);
                         return (t, Enum.GetUnderlyingType(t));
                     }
                 default:
                     throw new InvalidOperationException("Bad enum type identity.");
             }
         }
+
+        private static Type ResolveEnumType(string fullName, string assembly, Guid identity) =>
+            ResolveType(fullName, assembly, identity) is { IsEnum: true } type
+                ? type
+                : throw new TypeLoadException($"Enum '{fullName}' was not found in '{assembly}' ({identity}).");
 
         private static Type? ResolveType(string full, string asmSimple, Guid mvid)
         {
@@ -1124,7 +1179,7 @@ public static class BinaryDeltaCodec
                 case TypeSpecKind.Enum:
                     if (_opt.IncludeHeader && _enumTypes is { Length: > 0 })
                     {
-                        var tid = (int)sr.ReadVarUIntChecked(_enumTypes.Length);
+                        var tid = (int)sr.ReadVarUIntChecked(_enumTypes.Length - 1);
                         return _enumTypes[tid];
                     }
 
@@ -1133,7 +1188,7 @@ public static class BinaryDeltaCodec
 
                     var mvid = ReadGuid16(ref sr);
 
-                    return ResolveType(full, asm, mvid) ?? typeof(object);
+                    return ResolveEnumType(full, asm, mvid);
                 default:
                     throw new InvalidOperationException("Unknown TypeSpecKind.");
             }
@@ -1216,14 +1271,14 @@ public static class BinaryDeltaCodec
                 KnownTypeCode.DateTime => typeof(DateTime),
                 KnownTypeCode.TimeSpan => typeof(TimeSpan),
                 KnownTypeCode.DateTimeOffset => typeof(DateTimeOffset),
-                _ => typeof(object)
+                _ => throw new InvalidOperationException("Unknown BinaryDelta type code.")
             };
         }
 
-        private static Type ReadTypeEntry(ref SpanReader sr)
+        private Type ReadTypeEntry(ref SpanReader sr)
         {
-            var full = sr.ReadUtf8StringInlineChecked(int.MaxValue);
-            var asm = sr.ReadUtf8StringInlineChecked(int.MaxValue);
+            var full = sr.ReadUtf8StringInlineChecked(_opt.Safety.MaxStringBytes);
+            var asm = sr.ReadUtf8StringInlineChecked(_opt.Safety.MaxStringBytes);
 
             var mvid = ReadGuid16(ref sr);
 
@@ -1326,11 +1381,11 @@ public static class BinaryDeltaCodec
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void WriteUtf8StringInline(string s)
         {
-            var byteCount = Encoding.UTF8.GetByteCount(s);
+            var byteCount = Utf8.GetByteCount(s);
             WriteVarUInt((uint)byteCount);
             if (_pos + byteCount > _span.Length) Grow(byteCount);
 
-            _ = Encoding.UTF8.GetBytes(s.AsSpan(), _span.Slice(_pos));
+            _ = Utf8.GetBytes(s.AsSpan(), _span.Slice(_pos));
             _pos += byteCount;
         }
 
@@ -1408,6 +1463,7 @@ public static class BinaryDeltaCodec
             while (true)
             {
                 var b = ReadByte();
+                if (shift == 63 && b > 1) throw new InvalidOperationException("VarUInt out of range.");
                 result |= (ulong)(b & 0x7F) << shift;
                 if ((b & 0x80) == 0) break;
 
@@ -1442,13 +1498,13 @@ public static class BinaryDeltaCodec
             var len = (int)ReadVarUIntChecked(maxLen);
             RequireBytes(len);
             var bytes = _data.Slice(0, len);
-            var s = Encoding.UTF8.GetString(bytes);
+            var s = Utf8.GetString(bytes);
             _data = _data.Slice(len);
             return s;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void RequireBytes(int n)
+        public void RequireBytes(long n)
         {
             if (_data.Length < n) throw new InvalidOperationException("Unexpected EOF");
         }

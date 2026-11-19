@@ -183,27 +183,7 @@ public static class GeneratedHelperRegistry
     public static void ComputeDeltaSameType(Type runtimeType, object? left, object? right, ComparisonContext context,
         ref DeltaWriter writer)
     {
-        if (_deltaComputeMap.TryGetValue(runtimeType, out var fn))
-        {
-            fn(left, right, context, ref writer);
-            return;
-        }
-
-        for (var bt = runtimeType.BaseType; bt is not null; bt = bt.BaseType)
-            if (_deltaComputeMap.TryGetValue(bt, out var baseFn))
-            {
-                _deltaComputeMap.TryAdd(runtimeType, baseFn);
-                baseFn(left, right, context, ref writer);
-                return;
-            }
-
-        foreach (var i in runtimeType.GetInterfaces())
-            if (_deltaComputeMap.TryGetValue(i, out var ifaceFn))
-            {
-                _deltaComputeMap.TryAdd(runtimeType, ifaceFn);
-                ifaceFn(left, right, context, ref writer);
-                return;
-            }
+        TryComputeDeltaSameType(runtimeType, left, right, context, ref writer);
     }
 
     public static bool TryComputeDeltaSameType(Type runtimeType, object? left, object? right, ComparisonContext context,
@@ -214,22 +194,6 @@ public static class GeneratedHelperRegistry
             fn(left, right, context, ref writer);
             return true;
         }
-
-        for (var bt = runtimeType.BaseType; bt is not null; bt = bt.BaseType)
-            if (_deltaComputeMap.TryGetValue(bt, out var baseFn))
-            {
-                _deltaComputeMap.TryAdd(runtimeType, baseFn);
-                baseFn(left, right, context, ref writer);
-                return true;
-            }
-
-        foreach (var i in runtimeType.GetInterfaces())
-            if (_deltaComputeMap.TryGetValue(i, out var ifaceFn))
-            {
-                _deltaComputeMap.TryAdd(runtimeType, ifaceFn);
-                ifaceFn(left, right, context, ref writer);
-                return true;
-            }
 
         return false;
     }
@@ -244,22 +208,6 @@ public static class GeneratedHelperRegistry
             fn(ref target, ref reader);
             return true;
         }
-
-        for (var bt = runtimeType.BaseType; bt is not null; bt = bt.BaseType)
-            if (_deltaApplyObjMap.TryGetValue(bt, out var baseFn))
-            {
-                _deltaApplyObjMap.TryAdd(runtimeType, baseFn);
-                baseFn(ref target, ref reader);
-                return true;
-            }
-
-        foreach (var i in runtimeType.GetInterfaces())
-            if (_deltaApplyObjMap.TryGetValue(i, out var ifaceFn))
-            {
-                _deltaApplyObjMap.TryAdd(runtimeType, ifaceFn);
-                ifaceFn(ref target, ref reader);
-                return true;
-            }
 
         return false;
     }

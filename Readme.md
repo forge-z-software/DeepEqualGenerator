@@ -4,7 +4,7 @@ Compare .NET models with generated code. Ask for a boolean in the hot path or ge
 
 ## Quick start
 
-The 2.0 preview bundles the generator, attributes, and runtime in one package. It targets .NET 8 or later and requires a C# 12 compiler with Roslyn 4.11 or later.
+Version 2.0 bundles the generator, attributes, and runtime in one package. It targets .NET 8 or later and requires a C# 12 compiler with Roslyn 4.11 or later.
 
 ```csharp
 using DeepEqual;
@@ -46,21 +46,36 @@ $.Lines["SKU-9"].Qty changed from 2 to 3
 
 Compare an external model by adding `[assembly: ExternalDeepComparable(typeof(ExternalModel))]`. `[assembly: ExternalDeepCompare(typeof(ExternalModel), nameof(ExternalModel.Timestamp), Kind = CompareKind.Skip)]` applies a rule to a direct member.
 
-## Build and try the preview
+## Diffs and deltas
 
-The repository uses the .NET 8.0.4xx SDK. Pack locally and run the consumer example against that package.
+Set `GenerateDiff = true` to enable `GetDeepDiff`. Set `GenerateDelta = true` to enable `ComputeDeepDelta` and `ApplyDeepDelta`. The generated patch can update writable members and supported mutable collections in place. It uses a replacement for immutable state and for list changes where positional operations would be ambiguous. Capture the returned object when applying a patch to a class.
 
-```sh
-dotnet test DeepEqual.Generator.Tests/DeepEqual.Generator.Tests.csproj -c Release
-dotnet pack DeepEqual.Generator.Shared/DeepEqual.Generator.Shared.csproj -c Release -o artifacts/packages
-dotnet restore samples/OrderComparison/OrderComparison.csproj --source artifacts/packages --packages artifacts/smoke-cache
-dotnet run --project samples/OrderComparison/OrderComparison.csproj -c Release --no-restore
+```csharp
+var delta = original.ComputeDeepDelta(desired);
+var result = original.ApplyDeepDelta(delta);
+bool reproduced = desired.AreDeepEqual(result);
 ```
 
-Install the preview from that local feed with `dotnet add package DeepEqual.Generator --version 2.0.0-preview.1 --source <feed-path>`.
+Apply a delta to the same baseline and model schema used to compute it. In-memory replacements can retain references to the desired values. The in-memory API checks the root type of generated delta documents before applying them.
+
+Use `BinaryDeltaCodec` to transport supported delta values between matching schemas. Set `IncludeHeader = true` and give both endpoints the same nonzero `StableTypeFingerprint`. Change that identifier when you change the schema or comparison rules. The codec supports primitives, strings, GUIDs, date and time values, enums, byte arrays, and supported one-dimensional arrays, lists, and dictionaries. Arbitrary model instances and cycles require an application-level representation. Dictionary containers decode with the default key comparer. Enum identity requires the matching enum assembly. [Binary delta round-trip example](samples/DeltaRoundTrip/Program.cs)
+
+Generated diff and delta extensions require a nongeneric root. Equality and mismatch explanations also support generic roots and Native AOT. The binary codec uses runtime type construction for typed collections, so its supported deployment target is the regular .NET runtime.
+
+## Build and verify
+
+Use a serviced .NET 8.0.4xx SDK. Build, test, pack, and run both examples against the local feed.
+
+```sh
+dotnet build DeepEqual.Generator.sln -c Release
+dotnet test DeepEqual.Generator.Tests/DeepEqual.Generator.Tests.csproj -c Release --no-build
+dotnet pack DeepEqual.Generator.Shared/DeepEqual.Generator.Shared.csproj -c Release --no-build -o artifacts/packages
+dotnet restore samples/OrderComparison/OrderComparison.csproj --source artifacts/packages --packages artifacts/smoke-cache
+dotnet run --project samples/OrderComparison/OrderComparison.csproj -c Release --no-restore
+dotnet restore samples/DeltaRoundTrip/DeltaRoundTrip.csproj --source artifacts/packages --packages artifacts/smoke-cache
+dotnet run --project samples/DeltaRoundTrip/DeltaRoundTrip.csproj -c Release --no-restore
+```
+
+Install 2.0 from that local feed with `dotnet add package DeepEqual.Generator --version 2.0.0 --source <feed-path>`. For a 1.x project, remove its separate `DeepEqual.Generator.Shared` package reference and call `expected.AreDeepEqual(actual)` with `using DeepEqual;`.
 
 Run the [comparison benchmarks](DeepEqual.Generator.Benchmarking/DeepEqualityBenchmarks.cs) with `dotnet run -c Release --project DeepEqual.Generator.Benchmarking -- --filter '*DeepEqualityBenchmarks*'`. The fixture checks both comparers and the mismatch path before timing equal models and a late mismatch.
-
-## Experimental change APIs
-
-`GenerateDiff = true` enables the structured `GetDeepDiff` API. `GenerateDelta = true` enables `ComputeDeepDelta` and `ApplyDeepDelta`. Capture the returned target when applying a patch to a class, since the patch can replace the instance. Change tracking and the binary delta codec are also experimental. Use deltas with known matching schemas and test compute-and-apply round trips on your models before depending on them.

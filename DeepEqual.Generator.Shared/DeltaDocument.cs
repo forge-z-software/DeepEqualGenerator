@@ -8,16 +8,23 @@ namespace DeepEqual.Generator.Shared;
 /// </summary>
 public sealed class DeltaDocument
 {
-    public static readonly DeltaDocument Empty = new();
+    public static DeltaDocument Empty => new();
 
     [ThreadStatic] private static Stack<DeltaDocument>? _pool;
     public readonly List<DeltaOp> Ops = [];
     public IReadOnlyList<DeltaOp> Operations => Ops;
     public bool IsEmpty => Ops.Count == 0;
+    internal Type? RootType { get; private set; }
+
+    /// <summary>Creates an in-memory document associated with a generated root schema.</summary>
+    public static DeltaDocument ForRoot<T>() => new() { RootType = typeof(T) };
+
+    internal static DeltaDocument ForRoot(Type? type) => new() { RootType = type };
 
     internal void Clear()
     {
         Ops.Clear();
+        RootType = null;
     }
 
     public static DeltaDocument Rent(int initialCapacity)

@@ -12,7 +12,7 @@ public sealed class BinaryDeltaOptions
     /// </summary>
     public bool IncludeHeader { get; set; } = false;
 
-    /// <summary>Set when IncludeHeader=true. Optional stable type fingerprint (64-bit) for schema/version gating.</summary>
+    /// <summary>Header schema identifier. A nonzero reader value must match the encoded value.</summary>
     public ulong StableTypeFingerprint { get; set; } = 0;
 
     /// <summary>Pre-announce and reference enum types via compact table (headerful only).</summary>
@@ -35,7 +35,7 @@ public sealed class BinaryDeltaOptions
         /// <summary>Max encoded UTF-8 string length in bytes.</summary>
         public int MaxStringBytes { get; set; } = 16 * 1024 * 1024;
 
-        /// <summary>Max nesting depth for nested documents (member or dict-nested).</summary>
+        /// <summary>Max depth of nested documents and collections, from 0 through 256.</summary>
         public int MaxNesting { get; set; } = 256;
     }
 }
