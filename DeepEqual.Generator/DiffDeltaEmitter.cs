@@ -52,7 +52,6 @@ internal sealed class DiffDeltaEmitter
         {
             w.Open("public static partial class DeepOpsExtensions", () =>
             {
-                var ensureEqualityName = "__EnsureEquality__" + sanitizedId;
                 var ensureDiffName = "__EnsureDiffDelta__" + sanitizedId;
                 var guardFieldName = "__ddInit__" + sanitizedId;
                 var lockFieldName = "__ddLock__" + sanitizedId;
@@ -74,8 +73,7 @@ internal sealed class DiffDeltaEmitter
                             if (root.GenerateDelta)
                                 writer.Line("GeneratedHelperRegistry.RegisterDelta<" + fqn + ">(ComputeDelta__" + id + ", ApplyDelta__" + id + ");");
                         }
-                    },
-                    ensureEqualityName + "();");
+                    });
 
                 EmitterCommon.EmitModuleInitializer(w, moduleInitName, ensureDiffName);
 

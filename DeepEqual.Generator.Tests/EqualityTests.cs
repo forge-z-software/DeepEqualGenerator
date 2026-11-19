@@ -1062,10 +1062,12 @@ namespace DeepEqual.RewrittenTests
             {
                 // Different instances but same values
                 DeepOverride = new NodeRefDefault { V = 123 },
-                RefDefault = new NodeRefDefault { V = 456 }
+                RefDefault = x1.RefDefault
             };
 
             Assert.True(x1.AreDeepEqual(x2));
+            x2.RefDefault = new NodeRefDefault { V = 456 };
+            Assert.False(x1.AreDeepEqual(x2));
         }
 
         [Fact]

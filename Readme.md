@@ -1,190 +1,66 @@
-# DeepEqual Source Generator — Tiered Usage & Configuration
+# DeepEqualGenerator
 
-This guide explains the DeepEqual source generator in **three tiers of complexity**:
+Compare .NET models with generated code. Ask for a boolean in the hot path or get the first mismatch with its path and both values.
 
-* **Tier 1 — Common use cases** (most developers)
-* **Tier 2 — Uncommon / intermediate** (customizations)
-* **Tier 3 — Specialized / expert** (advanced scenarios)
+## Quick start
 
-All features and configuration knobs are documented, but grouped by when you realistically need them.
-
----
-
-## Tier 1 — Common use cases
-
-For most developers, you just want deep equality, diffing, or deltas. The generator makes this very simple.
-
-### Quick start
-
-Annotate your model:
+The 2.0 preview bundles the generator, attributes, and runtime in one package. It targets .NET 8 or later and requires a C# 12 compiler with Roslyn 4.11 or later.
 
 ```csharp
+using DeepEqual;
+using DeepEqual.Generator.Shared;
+
+var expected = new Order { Lines = [new("SKU-8", 1), new("SKU-9", 2)] };
+var actual = new Order { Lines = [new("SKU-9", 3), new("SKU-8", 1)] };
+
+bool equal = expected.AreDeepEqual(actual);
+DeepMismatch? mismatch = expected.GetDeepMismatch(actual);
+if (mismatch is { } change)
+    Console.WriteLine($"{change.Path} changed from {change.Expected} to {change.Actual}");
+
 [DeepComparable]
-public partial class Person
+public sealed class Order
 {
-    public string Name { get; set; }
-    public int Age { get; set; }
+    [DeepCompare(KeyMembers = [nameof(Line.Sku)])]
+    public List<Line> Lines { get; init; } = [];
 }
+
+public sealed record Line(string Sku, int Qty);
 ```
 
-### Equality
-
-```csharp
-var areEqual = PersonDeepEqual.AreDeepEqual(a, b);
+```text
+$.Lines["SKU-9"].Qty changed from 2 to 3
 ```
 
-### Diff
+`GetDeepMismatch` runs the same generated comparison as `AreDeepEqual` and returns `null` for equal inputs. It reports the first failure in traversal order. Paths start at `$` and include property names, zero-based sequence indices, and dictionary or matching keys where available. A count or shape mismatch is reported at the collection. If unordered elements have no unique matching key, the mismatch can be reported at the collection or key bucket.
 
-Enable diff:
+## Comparison rules
 
-```csharp
-[DeepComparable(GenerateDiff = true)]
-public partial class Person { ... }
+- Readable public instance properties and fields are included by default, including inherited members. Use `[DeepComparable(IncludeBaseMembers = false)]` to exclude inherited members or `IncludeInternals = true` to include eligible internal members. Getters run during comparison, so compare stable snapshots when values can mutate.
+- Cycle tracking is enabled by default and treats repeated pairs on the current path as equal. Shared reference topology is ignored. Set `CycleTracking = false` only for acyclic graphs.
+- Lists and one-dimensional arrays are ordered by default. `OrderInsensitive = true` matches elements one-to-one and counts duplicates. `KeyMembers` enables unordered matching within key buckets. Prefer unique keys for precise mismatch paths and larger collections.
+- Dictionary keys and matching keys use .NET default key equality regardless of the input dictionaries' comparers. `ComparisonOptions.StringComparison` governs the compared string values. Date and time values compare `DateTime.Kind` or `DateTimeOffset.Offset` as well as the time value.
+- `ComparisonOptions` supports absolute numeric tolerances and NaN handling. A tolerance can relate values non-transitively and is intended for comparisons, assertions, or validation.
+- `[DeepCompare(Kind = CompareKind.Skip)]` skips a member. `Shallow` uses its regular equality and `Reference` requires the same instance. Use `ComparerType` for an `IEqualityComparer<T>` with an accessible parameterless constructor. Apply `Members` or `IgnoreMembers` to the type that declares those members.
+- For values stored as `object` or an interface, generated helpers are used when the runtime type has been registered. Known runtime containers are compared by content. Other runtime values fall back to their regular equality. Use the typed extensions for generic comparison roots.
+
+Compare an external model by adding `[assembly: ExternalDeepComparable(typeof(ExternalModel))]`. `[assembly: ExternalDeepCompare(typeof(ExternalModel), nameof(ExternalModel.Timestamp), Kind = CompareKind.Skip)]` applies a rule to a direct member.
+
+## Build and try the preview
+
+The repository uses the .NET 8.0.4xx SDK. Pack locally and run the consumer example against that package.
+
+```sh
+dotnet test DeepEqual.Generator.Tests/DeepEqual.Generator.Tests.csproj -c Release
+dotnet pack DeepEqual.Generator.Shared/DeepEqual.Generator.Shared.csproj -c Release -o artifacts/packages
+dotnet restore samples/OrderComparison/OrderComparison.csproj --source artifacts/packages --packages artifacts/smoke-cache
+dotnet run --project samples/OrderComparison/OrderComparison.csproj -c Release --no-restore
 ```
 
-Usage:
+Install the preview from that local feed with `dotnet add package DeepEqual.Generator --version 2.0.0-preview.1 --source <feed-path>`.
 
-```csharp
-var diffs = PersonDeepOps.Diff(left, right);
-```
+Run the [comparison benchmarks](DeepEqual.Generator.Benchmarking/DeepEqualityBenchmarks.cs) with `dotnet run -c Release --project DeepEqual.Generator.Benchmarking -- --filter '*DeepEqualityBenchmarks*'`. The fixture checks both comparers and the mismatch path before timing equal models and a late mismatch.
 
-### Delta (patching)
+## Experimental change APIs
 
-Enable delta:
-
-```csharp
-[DeepComparable(GenerateDelta = true)]
-public partial class Person { ... }
-```
-
-Usage:
-
-```csharp
-var doc = DeltaDocument.Rent();
-var writer = new DeltaWriter(doc);
-PersonDeepOps.ComputeDelta(left, right, default, ref writer);
-PersonDeepOps.ApplyDelta(ref target, ref new DeltaReader(doc));
-```
-
-✅ That’s it for Tier 1. You can stop here and already have powerful, high-performance equality and delta handling.
-
----
-
-## Tier 2 — Uncommon / Intermediate use cases
-
-When you need more control over how members are compared, or want runtime tweaks.
-
-### `[DeepCompare]` (member-level overrides)
-
-* `Kind` → `Deep` (default), `Shallow`, `Reference`, `Skip`.
-* `OrderInsensitive` → ignore element order in collections.
-* `ComparerType` → custom `IEqualityComparer<T>`.
-* `KeyMembers` → member(s) used to match items in unordered collections.
-* `DeltaShallow` / `DeltaSkip` → influence delta emission.
-
-**Example:**
-
-```csharp
-public class Order
-{
-    [DeepCompare(Kind = DeepCompareKind.Shallow)]
-    public byte[] RawBytes { get; set; }
-}
-```
-
-### Options at runtime (`ComparisonOptions`)
-
-```csharp
-var ctx = new ComparisonContext(new ComparisonOptions
-{
-    StringComparison = StringComparison.OrdinalIgnoreCase,
-    TreatNaNEqual = true,
-    DoubleEpsilon = 1e-6
-});
-
-if (PersonDeepEqual.AreDeepEqual(a, b, ctx)) { ... }
-```
-
-Available options:
-
-* `StringComparison`
-* `TreatNaNEqual`
-* `DoubleEpsilon` / `FloatEpsilon` / `DecimalEpsilon`
-* `ValidateDirtyOnEmit`
-
-### Dirty-bit tracking
-
-```csharp
-[DeltaTrack(ThreadSafe = true)]
-public partial class PlayerState { ... }
-```
-
-This enables efficient change tracking for emitting small deltas.
-
----
-
-## Tier 3 — Specialized / Expert use cases
-
-When you need schema stability, cross-version transport, or custom integration.
-
-### Attributes
-
-* `IncludeInternals` — include internal members of the same assembly.
-* `IncludeBaseMembers` — include inherited members.
-* `OrderInsensitiveCollections` — collections default to unordered.
-* `CycleTracking` — enable cycle detection for graphs.
-* `StableMemberIndex` — control stability of member indices in deltas: `Auto`, `On`, `Off`.
-* `EmitSchemaSnapshot` — emit schema snapshot code for versioning.
-
-### Assembly-scoped attributes
-
-* `[ExternalDeepComparable(typeof(SomeExternalType))]`
-* `[ExternalDeepCompare(typeof(SomeExternalType), "Path.To.Member")]`
-
-### Binary delta codec (`BinaryDeltaOptions`)
-
-* `IncludeHeader` — include header with type/string tables.
-* `StableTypeFingerprint` — schema fingerprint (64-bit).
-* `UseTypeTable` / `UseStringTable` — optimize binary size.
-* `IncludeEnumTypeIdentity` — include enum identity with values.
-* Safety caps:
-
-  * `MaxOps` (default 1M)
-  * `MaxStringBytes` (default 16MB)
-  * `MaxNesting` (default 256)
-
-### Examples
-
-```csharp
-// Binary encode with schema fingerprint
-var options = new BinaryDeltaOptions
-{
-    IncludeHeader = true,
-    StableTypeFingerprint = 0xDEADBEEFCAFEBABE
-};
-
-var buffer = new ArrayBufferWriter<byte>();
-doc.ToBinary(buffer, options);
-var parsed = DeltaDocument.FromBinary(buffer.WrittenSpan, options);
-```
-
-### Runtime APIs (registry)
-
-* `GeneratedHelperRegistry.RegisterComparer<T>()`
-* `TryCompare`, `TryCompareSameType`
-* `RegisterDelta<T>(compute, apply)`
-* `ComputeDeltaSameType`, `TryApplyDeltaSameType`
-
-### Dynamic comparer
-
-* `DynamicDeepComparer.AreEqualDynamic(a, b, ctx)` — fallback for unknown runtime types.
-
----
-
-## Summary
-
-* **Tier 1 (Common):** `[DeepComparable]`, equality, diff, delta → easy.
-* **Tier 2 (Intermediate):** member overrides, runtime options, dirty-bit tracking.
-* **Tier 3 (Expert):** schema/versioning, binary codec tuning, external type overrides.
-
-This structure lets new users succeed quickly while giving advanced teams full control when needed.
+`GenerateDiff = true` enables the structured `GetDeepDiff` API. `GenerateDelta = true` enables `ComputeDeepDelta` and `ApplyDeepDelta`. Capture the returned target when applying a patch to a class, since the patch can replace the instance. Change tracking and the binary delta codec are also experimental. Use deltas with known matching schemas and test compute-and-apply round trips on your models before depending on them.

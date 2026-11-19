@@ -3,7 +3,7 @@
 namespace DeepEqual.Generator.Shared;
 
 /// <summary>
-///     Assembly-scoped: acts like [DeepCompare] but applies to a member reached via Root + Path.
+///     Assembly-scoped: applies a comparison rule to a readable member of an adopted root.
 /// </summary>
 [AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)]
 public sealed class ExternalDeepCompareAttribute(Type root, string path) : DeepCompareAttribute
@@ -12,8 +12,7 @@ public sealed class ExternalDeepCompareAttribute(Type root, string path) : DeepC
     public Type Root { get; } = root ?? throw new ArgumentNullException(nameof(root));
 
     /// <summary>
-    ///     Member path, e.g. "Nested.MoreNested.Prop", or for dictionaries:
-    ///     "SomeDictionary&lt;Key&gt;.Id" / "SomeDictionary&lt;Value&gt;.Name".
+    ///     The name of a direct member of the root.
     /// </summary>
     public string Path { get; } =
         !string.IsNullOrWhiteSpace(path) ? path : throw new ArgumentNullException(nameof(path));

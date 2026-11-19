@@ -7,8 +7,7 @@ namespace DeepEqual.Generator.Shared;
 /// </summary>
 /// <remarks>
 ///     <para>
-///         Apply this to any model you want to compare deeply. A static helper named
-///         <c>{TypeName}DeepEqual</c> is generated with <c>AreDeepEqual(left, right)</c>.
+///         Apply this to a model to generate <c>AreDeepEqual</c> and <c>GetDeepMismatch</c> extensions.
 ///     </para>
 ///     <para>
 ///         Nested types and referenced user types are included automatically when they appear under the root.
@@ -21,7 +20,7 @@ public class DeepComparableAttribute : Attribute
     public bool OrderInsensitiveCollections { get; set; }
 
     /// <summary> Enable cycle tracking for this type's object graphs. </summary>
-    public bool CycleTracking { get; set; }
+    public bool CycleTracking { get; set; } = true;
 
     /// <summary> Include <c>internal</c> members and compare internal types from the same assembly. </summary>
     public bool IncludeInternals { get; set; }

@@ -37,9 +37,10 @@ public static class GeneratedHelperRegistry
     /// </summary>
     public delegate bool DiffFunc(object left, object right, ComparisonContext context, out IDiff diff);
 
-    private static readonly ConcurrentDictionary<Type, bool> _eqMiss = new();
     private static readonly ConcurrentDictionary<Type, Func<object, object, ComparisonContext, bool>> _eqMap = new();
     private static readonly ConcurrentDictionary<Type, object> _eqTypedMap = new();
+    private static readonly ConcurrentDictionary<Type, Func<object, object, ComparisonContext, bool>> _reachableEqMap = new();
+    private static readonly ConcurrentDictionary<Type, object> _reachableEqTypedMap = new();
     private static readonly ConcurrentDictionary<Type, DiffFunc> _diffMap = new();
 
     private static readonly ConcurrentDictionary<Type, ComputeDeltaObjFunc> _deltaComputeMap = new();
@@ -55,41 +56,24 @@ public static class GeneratedHelperRegistry
         _eqTypedMap[t] = comparer;
     }
 
+    public static void RegisterReachableComparer<T>(Func<T, T, ComparisonContext, bool> comparer)
+    {
+        _reachableEqMap.TryAdd(typeof(T), (left, right, context) => comparer((T)left, (T)right, context));
+        _reachableEqTypedMap.TryAdd(typeof(T), comparer);
+    }
+
     /// <summary>
     ///     Attempts to compare two objects of the same runtime type using a generated comparer.
     /// </summary>
     public static bool TryCompareSameType(Type runtimeType, object left, object right, ComparisonContext context,
         out bool equal)
     {
-        if (_eqMiss.TryGetValue(runtimeType, out _))
+        if (TryGetComparerSameType(runtimeType, out var comparer))
         {
-            equal = false;
-            return false;
-        }
-
-        if (_eqMap.TryGetValue(runtimeType, out var fn))
-        {
-            equal = fn(left, right, context);
+            equal = comparer!(left, right, context);
             return true;
         }
 
-        for (var bt = runtimeType.BaseType; bt is not null; bt = bt.BaseType)
-            if (_eqMap.TryGetValue(bt, out var cmp))
-            {
-                _eqMap.TryAdd(runtimeType, cmp);
-                equal = cmp(left, right, context);
-                return true;
-            }
-
-        foreach (var i in runtimeType.GetInterfaces())
-            if (_eqMap.TryGetValue(i, out var cmp))
-            {
-                _eqMap.TryAdd(runtimeType, cmp);
-                equal = cmp(left, right, context);
-                return true;
-            }
-
-        _eqMiss.TryAdd(runtimeType, true);
         equal = false;
         return false;
     }
@@ -97,7 +81,8 @@ public static class GeneratedHelperRegistry
 
     internal static bool TryGetTypedComparer<T>(out Func<T, T, ComparisonContext, bool>? comparer)
     {
-        if (_eqTypedMap.TryGetValue(typeof(T), out var boxed))
+        if (_eqTypedMap.TryGetValue(typeof(T), out var boxed) ||
+            _reachableEqTypedMap.TryGetValue(typeof(T), out boxed))
         {
             comparer = (Func<T, T, ComparisonContext, bool>)boxed;
             return true;
@@ -112,37 +97,7 @@ public static class GeneratedHelperRegistry
     /// </summary>
     public static bool TryGetComparerSameType(Type runtimeType, out Func<object, object, ComparisonContext, bool>? comparer)
     {
-        if (_eqMap.TryGetValue(runtimeType, out var fn))
-        {
-            comparer = fn;
-            return true;
-        }
-
-        if (_eqMiss.TryGetValue(runtimeType, out _))
-        {
-            comparer = null;
-            return false;
-        }
-
-        for (var bt = runtimeType.BaseType; bt is not null; bt = bt.BaseType)
-            if (_eqMap.TryGetValue(bt, out var baseFn))
-            {
-                _eqMap.TryAdd(runtimeType, baseFn);
-                comparer = baseFn;
-                return true;
-            }
-
-        foreach (var i in runtimeType.GetInterfaces())
-            if (_eqMap.TryGetValue(i, out var ifaceFn))
-            {
-                _eqMap.TryAdd(runtimeType, ifaceFn);
-                comparer = ifaceFn;
-                return true;
-            }
-
-        _eqMiss.TryAdd(runtimeType, true);
-        comparer = null;
-        return false;
+        return _eqMap.TryGetValue(runtimeType, out comparer) || _reachableEqMap.TryGetValue(runtimeType, out comparer);
     }
 
     /// <summary>

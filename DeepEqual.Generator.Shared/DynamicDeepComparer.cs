@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 
 namespace DeepEqual.Generator.Shared;
@@ -18,6 +19,11 @@ public static class DynamicDeepComparer
         if (left is double da && right is double db) return ComparisonHelpers.AreEqualDouble(da, db, context);
         if (left is float fa && right is float fb) return ComparisonHelpers.AreEqualSingle(fa, fb, context);
         if (left is decimal m1 && right is decimal m2) return ComparisonHelpers.AreEqualDecimal(m1, m2, context);
+
+        if (left is DateTime timeA && right is DateTime timeB)
+            return ComparisonHelpers.AreEqualDateTime(timeA, timeB);
+        if (left is DateTimeOffset offsetA && right is DateTimeOffset offsetB)
+            return ComparisonHelpers.AreEqualDateTimeOffset(offsetA, offsetB);
 
         // Cross-type numeric comparison (e.g., int vs long, int vs double)
         if (IsNumeric(left) && IsNumeric(right)) return NumericEqual(left, right, context);
@@ -72,9 +78,6 @@ public static class DynamicDeepComparer
             finally { context.Exit(left, right); }
         }
 
-        // Primitive-like fallback
-        if (IsPrimitiveLike(left)) return left.Equals(right);
-
         return left.Equals(right);
     }
 
@@ -84,57 +87,43 @@ public static class DynamicDeepComparer
         var n = a.Count;
         if (n != b.Count) return false;
         for (var i = 0; i < n; i++)
-            if (!AreEqualDynamic(a[i], b[i], context))
+            if (!ComparisonHelpers.CompareAtIndex(a[i], b[i], i, new DeepPolymorphicElementComparer<object?>(), context))
                 return false;
         return true;
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool EqualStringObjectDictionary(
-        IDictionary<string, object?> a,
-        IDictionary<string, object?> b,
-        ComparisonContext context)
+        IDictionary<string, object?> a, IDictionary<string, object?> b, ComparisonContext context) =>
+        ComparisonHelpers.AreEqualDictionariesAny<string, object?, DeepPolymorphicElementComparer<object?>>(
+            a, b, default, context);
+
+    private static bool EqualNonGenericDictionary(IDictionary a, IDictionary b, ComparisonContext context) =>
+        a.Count == b.Count &&
+        ComparisonHelpers.AreEqualDictionariesAny<object, object?, DeepPolymorphicElementComparer<object?>>(
+            EnumerateEntries(a), EnumerateEntries(b), default, context);
+
+    private static IEnumerable<KeyValuePair<object, object?>> EnumerateEntries(IDictionary map)
     {
-        if (a.Count != b.Count) return false;
-
-        foreach (var kvp in a)
-        {
-            if (!b.TryGetValue(kvp.Key, out var rb)) return false;
-            if (!AreEqualDynamic(kvp.Value, rb, context)) return false;
-        }
-
-        return true;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool EqualNonGenericDictionary(IDictionary a, IDictionary b, ComparisonContext context)
-    {
-        if (a.Count != b.Count) return false;
-
-        foreach (DictionaryEntry de in a)
-        {
-            if (!b.Contains(de.Key)) return false;
-            var rv = b[de.Key];
-            if (!AreEqualDynamic(de.Value, rv, context)) return false;
-        }
-
-        return true;
+        foreach (DictionaryEntry entry in map)
+            yield return new(entry.Key, entry.Value);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool EqualNonGenericSequence(IEnumerable a, IEnumerable b, ComparisonContext context)
     {
         var ea = a.GetEnumerator();
-        var eb = b.GetEnumerator();
+        IEnumerator? eb = null;
         try
         {
-            while (true)
+            eb = b.GetEnumerator();
+            for (var index = 0; ; index++)
             {
                 var ma = ea.MoveNext();
                 var mb = eb.MoveNext();
                 if (ma != mb) return false;
                 if (!ma) return true;
-                if (!AreEqualDynamic(ea.Current, eb.Current, context)) return false;
+                if (!ComparisonHelpers.CompareAtIndex(ea.Current, eb.Current, index,
+                        new DeepPolymorphicElementComparer<object?>(), context)) return false;
             }
         }
         finally
@@ -142,20 +131,6 @@ public static class DynamicDeepComparer
             (ea as IDisposable)?.Dispose();
             (eb as IDisposable)?.Dispose();
         }
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool IsPrimitiveLike(object v)
-    {
-        return v is bool
-               || v is byte or sbyte
-               || v is short or ushort
-               || v is int or uint
-               || v is long or ulong
-               || v is char
-               || v is Guid
-               || v is DateTime or DateTimeOffset or TimeSpan
-               || v.GetType().IsEnum;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -168,15 +143,39 @@ public static class DynamicDeepComparer
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool NumericEqual(object a, object b, ComparisonContext context)
     {
-        if (a is float or double or decimal || b is float or double or decimal)
-        {
-            var da = a is decimal mad ? (double)mad : Convert.ToDouble(a);
-            var db = b is decimal mbd ? (double)mbd : Convert.ToDouble(b);
-            return ComparisonHelpers.AreEqualDouble(da, db, context);
-        }
+        var aIsFloating = a is float or double;
+        var bIsFloating = b is float or double;
+        if (!aIsFloating && !bIsFloating)
+            return a is decimal || b is decimal
+                ? ComparisonHelpers.AreEqualDecimal(Convert.ToDecimal(a), Convert.ToDecimal(b), context)
+                : Convert.ToDecimal(a) == Convert.ToDecimal(b);
 
-        var va = Convert.ToDecimal(a);
-        var vb = Convert.ToDecimal(b);
-        return va == vb;
+        if ((aIsFloating && bIsFloating) || context.Options.DoubleEpsilon > 0)
+            return ComparisonHelpers.AreEqualDouble(Convert.ToDouble(a), Convert.ToDouble(b), context);
+
+        return EqualBinaryAndDecimal(Convert.ToDouble(aIsFloating ? a : b), Convert.ToDecimal(aIsFloating ? b : a));
+    }
+
+    private static bool EqualBinaryAndDecimal(double floating, decimal exact)
+    {
+        if (!double.IsFinite(floating)) return false;
+        if (floating == 0 || exact == 0) return floating == 0 && exact == 0;
+        if ((floating < 0) != (exact < 0)) return false;
+
+        // Compare the two rational values without rounding either operand to the other's precision.
+        var bits = BitConverter.DoubleToInt64Bits(floating);
+        var exponent = (int)((bits >> 52) & 0x7ff);
+        var significand = (BigInteger)(bits & 0x000f_ffff_ffff_ffffL);
+        if (exponent != 0) significand += BigInteger.One << 52;
+        var powerOfTwo = Math.Max(exponent, 1) - 1075;
+
+        Span<int> parts = stackalloc int[4];
+        decimal.GetBits(exact, parts);
+        var unscaled = ((BigInteger)(uint)parts[2] << 64) | ((BigInteger)(uint)parts[1] << 32) | (uint)parts[0];
+        var scale = (parts[3] >> 16) & 0xff;
+        var scaledBinary = significand * BigInteger.Pow(10, scale);
+        return powerOfTwo >= 0
+            ? (scaledBinary << powerOfTwo) == unscaled
+            : scaledBinary == (unscaled << -powerOfTwo);
     }
 }

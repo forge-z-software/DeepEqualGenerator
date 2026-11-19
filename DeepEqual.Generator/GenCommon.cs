@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Text;
 using Microsoft.CodeAnalysis;
@@ -21,6 +20,7 @@ internal static class GenCommon
     {
         var set = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
         var queue = new Queue<INamedTypeSymbol>();
+        var expanded = new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
         set.Add(root.Type);
         queue.Enqueue(root.Type);
 
@@ -31,7 +31,7 @@ internal static class GenCommon
 
             foreach (var member in EnumerateMembers(current, root.IncludeInternals, root.IncludeBaseMembers, schema))
             {
-                var kind = GenCommon.GetEffectiveKind(member.Type, GetDeepCompareAttribute(member.Symbol));
+                var kind = GenCommon.GetEffectiveKind(member.Type, root.GetMemberRule(member.Symbol));
                 if (kind is EffectiveKind.Skip or EffectiveKind.Shallow or EffectiveKind.Reference) continue;
 
                 Accumulate(member.Type);
@@ -42,6 +42,7 @@ internal static class GenCommon
 
         void Accumulate(ITypeSymbol t)
         {
+            if (!expanded.Add(t)) return;
             if (t is INamedTypeSymbol nnt && nnt.OriginalDefinition.ToDisplayString() == "System.Nullable<T>")
                 t = nnt.TypeArguments[0];
 
@@ -79,6 +80,49 @@ internal static class GenCommon
                 queue.Enqueue(n);
         }
     }
+
+    internal static bool CanContainCycles(EqualityTarget root, HashSet<INamedTypeSymbol> reachable)
+    {
+        var active = new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
+        var acyclic = new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
+        return Visit(root.Type, inspectMembers: true);
+
+        bool Visit(ITypeSymbol type, bool inspectMembers = false)
+        {
+            if (acyclic.Contains(type)) return false;
+            if (!active.Add(type)) return true;
+
+            var canCycle = inspectMembers ? VisitMembers((INamedTypeSymbol)type) : VisitShape(type);
+            active.Remove(type);
+            if (!canCycle) acyclic.Add(type);
+            return canCycle;
+        }
+
+        bool VisitShape(ITypeSymbol type)
+        {
+            if (type.SpecialType == SpecialType.System_Object || type.TypeKind is TypeKind.Dynamic or TypeKind.TypeParameter)
+                return true;
+            if (type is IArrayTypeSymbol array) return Visit(array.ElementType);
+            if (type is INamedTypeSymbol nullable && nullable.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T)
+                return Visit(nullable.TypeArguments[0]);
+            if (TryGetDictionaryInterface(type, out _, out var value)) return Visit(value!);
+            if (TryGetEnumerableInterface(type, out var element)) return Visit(element!);
+            if (TryGetReadOnlyMemory(type, out element) || TryGetMemory(type, out element)) return Visit(element!);
+            if (type.TypeKind == TypeKind.Interface || type is INamedTypeSymbol { IsAbstract: true }) return true;
+            return type is INamedTypeSymbol named && reachable.Contains(named) && VisitMembers(named);
+        }
+
+        bool VisitMembers(INamedTypeSymbol type)
+        {
+            var schema = GetTypeSchema(type);
+            foreach (var member in EnumerateMembers(type, root.IncludeInternals, root.IncludeBaseMembers, schema))
+                if (GetEffectiveKind(member.Type, root.GetMemberRule(member.Symbol)) == EffectiveKind.Deep &&
+                    Visit(member.Type))
+                    return true;
+            return false;
+        }
+    }
+
     internal static bool TryEmitWellKnownStructCompare(CodeWriter w, string leftExpr, string rightExpr, ITypeSymbol type)
     {
         if (type.SpecialType == SpecialType.System_DateTime)
@@ -320,7 +364,7 @@ internal static class GenCommon
             return s.DeclaredAccessibility switch
             {
                 Accessibility.Public => true,
-                Accessibility.Internal or Accessibility.ProtectedAndInternal => inclInternals &&
+                Accessibility.Internal or Accessibility.ProtectedOrInternal => inclInternals &&
                     SymbolEqualityComparer.Default.Equals(s.ContainingAssembly, owner.ContainingAssembly),
                 _ => false
             };
@@ -345,7 +389,7 @@ internal static class GenCommon
 
                 if (p.GetMethod is null) continue;
 
-                if (!IsAccessible(p, includeInternals, ownerType)) continue;
+                if (!IsAccessible(p.GetMethod, includeInternals, ownerType)) continue;
 
                 if (yielded.Contains(p.Name)) continue;
 
@@ -522,7 +566,8 @@ internal static class GenCommon
         foreach (var n in names)
         {
             var m = FindMemberOn(elementType, n, root.IncludeInternals, root.IncludeBaseMembers);
-            if (m is not null) keys.Add(m.Value);
+            if (m is null) return false;
+            keys.Add(m.Value);
         }
 
         if (keys.Count == 0) return false;
@@ -530,7 +575,7 @@ internal static class GenCommon
         if (keys.Count == 1)
         {
             keyTypeFqn = keys[0].Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-            keyExprFormat = "{0}." + keys[0].Name;
+            keyExprFormat = "{0}.@" + keys[0].Name;
             return true;
         }
 
@@ -538,7 +583,7 @@ internal static class GenCommon
 
         keyTypeFqn = "global::System.ValueTuple<" + string.Join(",",
             keys.Select(k => k.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))) + ">";
-        keyExprFormat = "(" + string.Join(",", keys.Select(k => "{0}." + k.Name)) + ")";
+        keyExprFormat = "(" + string.Join(",", keys.Select(k => "{0}.@" + k.Name)) + ")";
         return true;
     }
 
@@ -554,7 +599,7 @@ internal static class GenCommon
 
                 if (p.IsStatic || p.Parameters.Length != 0 || p.GetMethod is null) continue;
 
-                if (!IsAccessibleForMember(p, includeInternals, type)) continue;
+                if (!IsAccessibleForMember(p.GetMethod, includeInternals, type)) continue;
 
                 return new EqualityMemberSymbol(p.Name, p.Type, p);
             }
@@ -581,7 +626,7 @@ internal static class GenCommon
         return s.DeclaredAccessibility switch
         {
             Accessibility.Public => true,
-            Accessibility.Internal or Accessibility.ProtectedAndInternal => inclInternals &&
+            Accessibility.Internal or Accessibility.ProtectedOrInternal => inclInternals &&
                                                                             SymbolEqualityComparer.Default.Equals(
                                                                                 s.ContainingAssembly,
                                                                                 owner.ContainingAssembly),
@@ -659,20 +704,17 @@ internal static class GenCommon
         return false;
     }
 
+    internal static bool IsPublicType(INamedTypeSymbol type)
+    {
+        for (INamedTypeSymbol? current = type; current is not null; current = current.ContainingType)
+            if (current.DeclaredAccessibility != Accessibility.Public) return false;
+
+        return true;
+    }
+
     internal static bool IsTypeAccessibleFromRoot(INamedTypeSymbol t, EqualityTarget root)
     {
-        if (t.DeclaredAccessibility == Accessibility.Public)
-        {
-            var cur = t.ContainingType;
-            while (cur is not null)
-            {
-                if (cur.DeclaredAccessibility != Accessibility.Public) return false;
-
-                cur = cur.ContainingType;
-            }
-
-            return true;
-        }
+        if (IsPublicType(t)) return true;
 
         if (!root.IncludeInternals) return false;
 
@@ -682,7 +724,7 @@ internal static class GenCommon
         while (c is not null)
         {
             if (c.DeclaredAccessibility is Accessibility.Public or Accessibility.Internal
-                or Accessibility.ProtectedAndInternal)
+                or Accessibility.ProtectedOrInternal)
             {
                 c = c.ContainingType;
                 continue;
@@ -706,10 +748,9 @@ internal static class GenCommon
         }
         else
         {
-            var ns = symbol.ContainingNamespace?.ToDisplayString() ?? "";
-            if (!string.IsNullOrEmpty(ns))
+            if (symbol.ContainingNamespace is { IsGlobalNamespace: false } ns)
             {
-                sb.Append(ns);
+                sb.Append(ns.ToDisplayString());
                 sb.Append('.');
             }
 
@@ -721,12 +762,19 @@ internal static class GenCommon
 
     internal static string SanitizeFileName(string value)
     {
-        var invalid = Path.GetInvalidFileNameChars();
         if (value.StartsWith("global::", StringComparison.Ordinal))
             value = value["global::".Length..];
 
-        var arr = value.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray();
-        return new string(arr);
+        var name = new StringBuilder(value.Length);
+        foreach (var ch in value)
+        {
+            if (ch is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '.')
+                name.Append(ch);
+            else
+                name.Append('_').Append(((int)ch).ToString("x4", System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        return name.ToString();
     }
 
     internal static string SanitizeIdentifier(string s)
@@ -746,7 +794,7 @@ internal static class GenCommon
         }
 
         var typeAttr = type.OriginalDefinition.GetAttributes()
-            .FirstOrDefault(a => a.AttributeClass?.ToDisplayString() == DeepComparableAttributeMetadataName);
+            .FirstOrDefault(a => a.AttributeClass?.ToDisplayString() == DeepCompareAttributeMetadataName);
         if (typeAttr is not null)
         {
             var val = typeAttr.NamedArguments.FirstOrDefault(p => p.Key == "Kind").Value.Value;
@@ -758,12 +806,15 @@ internal static class GenCommon
     internal static string GetHelperMethodName(INamedTypeSymbol type)
     {
         return "AreDeepEqual__" +
-               GenCommon.SanitizeIdentifier(type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
+               GenCommon.SanitizeIdentifier(SanitizeFileName(type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)));
     }
 
     internal static string BuildInlineCompareExpr(string l, string r, ITypeSymbol type, EffectiveKind kind,
         string ctxVar = "c", string? customEqVar = null)
     {
+        if (kind == EffectiveKind.Skip)
+            return "true";
+
         if (customEqVar is not null)
             return customEqVar + ".Equals(" + l + ", " + r + ")";
 
@@ -826,6 +877,10 @@ internal static class GenCommon
                     => l + "==" + r,
                 _ => l + ".Equals(" + r + ")"
             };
+
+        if (type is ITypeParameterSymbol or IArrayTypeSymbol || TryGetDictionaryInterface(type, out _, out _) ||
+            TryGetEnumerableInterface(type, out _))
+            return "DynamicDeepComparer.AreEqualDynamic(" + l + ", " + r + ", " + ctxVar + ")";
 
         if (type.TypeKind == TypeKind.Interface || type is INamedTypeSymbol { IsAbstract: true })
         {
@@ -919,6 +974,8 @@ internal static class GenCommon
         {
             var opt = memberAttribute.NamedArguments.FirstOrDefault(a => a.Key == "OrderInsensitive").Value;
             if (opt.Value is bool b) return b;
+            if (memberAttribute.NamedArguments.Any(a => a.Key == "KeyMembers" && a.Value.Values.Length > 0))
+                return true;
         }
 
         var typeAttr = elementType.OriginalDefinition.GetAttributes()

@@ -63,6 +63,23 @@ internal static class Diagnostics
             DiagnosticSeverity.Error,
             true);
 
+    internal static readonly DiagnosticDescriptor EQ003 =
+        new("EQ003", "Invalid collection key members",
+            "KeyMembers must name one to seven readable members of '{0}'", Category, DiagnosticSeverity.Error, true);
+
+    internal static readonly DiagnosticDescriptor EQ004 =
+        new("EQ004", "Invalid comparison rule",
+            "{0}", Category, DiagnosticSeverity.Error, true);
+
+    internal static readonly DiagnosticDescriptor EQ005 =
+        new("EQ005", "Unsupported comparison root",
+            "Cannot generate {0} for '{1}'", Category, DiagnosticSeverity.Error, true);
+
+    internal static readonly DiagnosticDescriptor EX004 =
+        new("EX004", "Unsupported external override",
+            "External override '{0}' requires a registered root, a direct readable member and equality generation only",
+            Category, DiagnosticSeverity.Error, true);
+
     internal static readonly DiagnosticDescriptor DF001 =
         new(
             "DF001",
@@ -126,7 +143,7 @@ internal static class Diagnostics
                     continue;
                 }
 
-                var tokens = path.Split(['.'], StringSplitOptions.RemoveEmptyEntries);
+                var tokens = path!.Split(['.'], StringSplitOptions.RemoveEmptyEntries);
                 for (var i = 0; i < tokens.Length; i++)
                 {
                     var t = tokens[i];

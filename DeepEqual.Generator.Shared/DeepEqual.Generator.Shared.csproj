@@ -1,10 +1,12 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 	<PropertyGroup>
 		<TargetFramework>net8.0</TargetFramework>
-		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-		<PackageId>DeepEqual.Generator.Shared</PackageId>
-		<Version>1.0.2</Version>
-		<Description>Runtime comparers and attributes for DeepEqual generator.</Description>
+		<PackageId>DeepEqual.Generator</PackageId>
+		<Version>2.0.0-preview.1</Version>
+		<Authors>Mirko Sangrigoli</Authors>
+		<Company>Quaverflow</Company>
+		<Description>Source-generated deep equality and mismatch paths for .NET models.</Description>
+		<PackageTags>deep-equality;source-generator;dotnet;diff</PackageTags>
 		<RepositoryUrl>https://github.com/Quaverflow/DeepEqualGenerator</RepositoryUrl>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 		<PackageReadmeFile>Readme.md</PackageReadmeFile>
@@ -19,10 +21,14 @@
 
 	<ItemGroup>
 		<PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+		<ProjectReference Include="..\DeepEqual.Generator\DeepEqual.Generator.csproj"
+			ReferenceOutputAssembly="false" PrivateAssets="all" />
 	</ItemGroup>
 
 	<ItemGroup>
 		<None Include="..\Readme.md" Pack="true" PackagePath="\" />
 		<None Include="..\icon.png" Pack="true" PackagePath="\" />
+		<None Include="..\DeepEqual.Generator\bin\$(Configuration)\netstandard2.0\DeepEqual.Generator.dll"
+			Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
 	</ItemGroup>
 </Project>

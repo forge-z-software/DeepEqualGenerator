@@ -741,26 +741,8 @@ public class Program
 {
     public static void Main(string[] args)
     {
-        var config = DefaultConfig.Instance.WithArtifactsPath(@"C:\Users\mirko\Downloads\benc");
-        if (args is { Length: > 0 })
-        {
-            BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(args, config);
-            return;
-        }
-
-        BenchmarkRunner.Run(
-        [
-            //typeof(Competitors_Adds_Benches),
-            //typeof(ExtraApplyClonePathBenches),
-            typeof(AccessTrackingComplexBenchmarks),
-            //typeof(AccessTrackingSetterBenchmarks),
-            //typeof(AccessTrackingListBenchmarks),
-            //typeof(ExtraArrayVsListBenches),
-            //typeof(ExtraCodecBenches),
-            //typeof(ExtraDirtyBitBenches),
-            //typeof(ExtraEqualityBenches),
-            //typeof(ExtraPolymorphicBenches),
-        ], config);
+        var selection = args.Length == 0 ? new[] { "--filter", "*DeepEqualityBenchmarks*" } : args;
+        BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(selection);
     }
 }
 
