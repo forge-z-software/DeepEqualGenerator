@@ -12,6 +12,7 @@ namespace DeepEqual.Generator.Shared;
 /// <summary>Lossless binary codec for <see cref="DeltaDocument" />.</summary>
 public static class BinaryDeltaCodec
 {
+    private const uint HeaderMagic = 0x31434442; // BDC1 in little-endian byte order.
     private static readonly Encoding Utf8 = new UTF8Encoding(false, true);
 
     public static void Write(DeltaDocument doc, IBufferWriter<byte> output, BinaryDeltaOptions? options = null)
@@ -137,7 +138,7 @@ public static class BinaryDeltaCodec
             var sw = new SpanWriter(_out);
             if (_opt.IncludeHeader)
             {
-                sw.WriteBytes("BDC1"u8);
+                sw.WriteUInt32(HeaderMagic);
                 sw.WriteVarUInt(1u);
                 sw.WriteVarUInt(_opt.StableTypeFingerprint);
                 var flags = (byte)((_strings is { Count: > 0 } ? 0b01 : 0) |
@@ -828,11 +829,7 @@ public static class BinaryDeltaCodec
 
         private DeltaOp ReadOp(ref SpanReader sr)
         {
-            var kind = (DeltaKind)sr.ReadVarUInt();
-            var member = sr.ReadVarInt();
-            if (member is < int.MinValue or > int.MaxValue)
-                throw new InvalidOperationException("memberIndex out of Int32 range.");
-            var memberIndex = (int)member;
+            sr.ReadOperationPrefix(out var kind, out var memberIndex);
 
             switch (kind)
             {
@@ -871,9 +868,7 @@ public static class BinaryDeltaCodec
 
             if (_opt.IncludeHeader)
             {
-                sr.RequireBytes(4);
-                if (sr.ReadByte() != (byte)'B' || sr.ReadByte() != (byte)'D' ||
-                    sr.ReadByte() != (byte)'C' || sr.ReadByte() != (byte)'1')
+                if (sr.ReadUInt32() != HeaderMagic)
                     throw new InvalidOperationException("Invalid BinaryDelta header magic.");
 
                 var version = sr.ReadVarUInt();
@@ -951,9 +946,17 @@ public static class BinaryDeltaCodec
             return collection;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private object? ReadValue(ref SpanReader sr)
         {
             var tag = (VTag)sr.ReadByte();
+            if (tag == VTag.Int32) return (int)sr.ReadVarInt();
+            if (tag == VTag.StringInline) return sr.ReadUtf8StringInlineChecked(_opt.Safety.MaxStringBytes);
+            return ReadOtherValue(ref sr, tag);
+        }
+
+        private object? ReadOtherValue(ref SpanReader sr, VTag tag)
+        {
             switch (tag)
             {
                 case VTag.Array:
@@ -968,7 +971,6 @@ public static class BinaryDeltaCodec
                 case VTag.Byte: return (byte)sr.ReadVarUInt();
                 case VTag.Int16: return (short)sr.ReadVarInt();
                 case VTag.UInt16: return (ushort)sr.ReadVarUInt();
-                case VTag.Int32: return (int)sr.ReadVarInt();
                 case VTag.UInt32: return (uint)sr.ReadVarUInt();
                 case VTag.Int64: return sr.ReadVarInt();
                 case VTag.UInt64: return sr.ReadVarUInt();
@@ -986,7 +988,6 @@ public static class BinaryDeltaCodec
                 }
                 case VTag.Decimal: return ReadDecimal(ref sr);
 
-                case VTag.StringInline: return sr.ReadUtf8StringInlineChecked(_opt.Safety.MaxStringBytes);
                 case VTag.StringRef:
                 {
                     if (_strings is not { Length: > 0 }) throw new InvalidOperationException("No string table in stream.");
@@ -1485,6 +1486,34 @@ public static class BinaryDeltaCodec
             var v = BinaryPrimitives.ReadUInt64LittleEndian(_data);
             _data = _data.Slice(8);
             return v;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void ReadOperationPrefix(out DeltaKind kind, out int memberIndex)
+        {
+            RequireBytes(2);
+            var prefix = BinaryPrimitives.ReadUInt16LittleEndian(_data);
+            // Both fields are single-byte varints unless either continuation bit is set.
+            if ((prefix & 0x8080) != 0)
+            {
+                ReadOperationPrefixSlow(out kind, out memberIndex);
+                return;
+            }
+
+            kind = (DeltaKind)(prefix & 0xff);
+            var member = prefix >> 8;
+            memberIndex = (member >> 1) ^ -(member & 1);
+            _data = _data.Slice(2);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void ReadOperationPrefixSlow(out DeltaKind kind, out int memberIndex)
+        {
+            kind = (DeltaKind)ReadVarUInt();
+            var member = ReadVarInt();
+            if (member is < int.MinValue or > int.MaxValue)
+                throw new InvalidOperationException("memberIndex out of Int32 range.");
+            memberIndex = (int)member;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

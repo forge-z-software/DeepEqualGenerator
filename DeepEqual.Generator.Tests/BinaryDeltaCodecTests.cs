@@ -80,6 +80,18 @@ public class BinaryDeltaCodecTests
         AssertDocsEqual(document, BinaryDeltaCodec.Read(previousBytes, options), options, "previous format");
     }
 
+    [Fact]
+    public void DecodeHandlesBothSingleByteAndMultibyteMemberIndices()
+    {
+        var document = new DeltaDocument();
+        var writer = new DeltaWriter(document);
+        foreach (var memberIndex in new[] { 0, 63, -64, 64, -65, int.MaxValue, int.MinValue })
+            writer.WriteSetMember(memberIndex, 300);
+
+        var options = new BinaryDeltaOptions { IncludeHeader = true };
+        AssertDocsEqual(document, BinaryDeltaCodec.Read(Encode(document, options), options), options, "member indices");
+    }
+
     /// <summary>Round-trips representative documents across supported codec option matrices.</summary>
     [Theory]
     [MemberData(nameof(RoundTripCases))]
