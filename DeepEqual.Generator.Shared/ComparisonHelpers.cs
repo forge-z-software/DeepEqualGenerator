@@ -177,6 +177,16 @@ public static class ComparisonHelpers
         if (a is T[] aa && b is T[] bb)
             return AreEqualArrayRank1<T, TComparer>(aa, bb, comparer, context);
 
+        if (a is List<T> listA && b is List<T> listB && !context.IsRecordingMismatch)
+        {
+            var count = listA.Count;
+            if (count != listB.Count) return false;
+            for (var i = 0; i < count; i++)
+                if (!comparer.Invoke(listA[i], listB[i], context))
+                    return false;
+            return true;
+        }
+
         if (a is IList<T> la && b is IList<T> lb)
         {
             if (la.Count != lb.Count) return context.RecordMismatch(la.Count, lb.Count, DeepMismatchKind.Count);

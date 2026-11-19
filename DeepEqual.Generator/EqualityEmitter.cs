@@ -135,6 +135,15 @@ internal sealed class EqualityEmitter
     {
         var fqn = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
         var helper = GenCommon.GetHelperMethodName(type);
+        var schema = GenCommon.GetTypeSchema(type);
+        var members = GenCommon.OrderMembers(
+            GenCommon.EnumerateMembers(type, root.IncludeInternals, root.IncludeBaseMembers, schema)).ToArray();
+        var terminalType = members.All(member =>
+        {
+            var rule = root.GetMemberRule(member.Symbol);
+            return IsTerminalComparison(member.Type, rule, GenCommon.GetEffectiveKind(member.Type, rule));
+        });
+
         w.Method("internal static bool " + helper + "(" + fqn + " left, " + fqn +
                  " right, DeepEqual.Generator.Shared.ComparisonContext context)", () =>
                  {
@@ -149,7 +158,7 @@ internal sealed class EqualityEmitter
                              w.Line("return false;");
                          });
 
-                         if (trackCycles)
+                         if (trackCycles && !terminalType)
                          {
                              w.If("!context.Enter(left, right)", () =>
                              {
@@ -173,7 +182,6 @@ internal sealed class EqualityEmitter
 
                      void EmitBody()
                      {
-                         var schema = GenCommon.GetTypeSchema(type);
                          var inc = schema.IncludeMembers;
                          var ign = schema.IgnoreMembers;
                          var schemaAttribute = GenCommon.GetDeepCompareAttribute(type);
@@ -203,7 +211,7 @@ internal sealed class EqualityEmitter
                                  }
                              }
 
-                         foreach (var member in GenCommon.OrderMembers(GenCommon.EnumerateMembers(type, root.IncludeInternals, root.IncludeBaseMembers, schema)))
+                         foreach (var member in members)
                          {
                              var rule = root.GetMemberRule(member.Symbol);
                              var kind = GenCommon.GetEffectiveKind(member.Type, rule);
@@ -215,11 +223,19 @@ internal sealed class EqualityEmitter
                                  var memberName = SyntaxFacts.GetKeywordKind(member.Name) != SyntaxKind.None
                                      ? "@" + member.Name
                                      : member.Name;
+                                 var literalName = Microsoft.CodeAnalysis.CSharp.SymbolDisplay.FormatLiteral(member.Name, true);
                                  w.Line("var expected = left." + memberName + ";");
                                  w.Line("var actual = right." + memberName + ";");
+                                 if (IsTerminalComparison(member.Type, rule, kind))
+                                 {
+                                     EmitMember(w, type, member, root, emittedComparers, comparerDeclarations, spc,
+                                         "return context.RecordMemberMismatch(" + literalName + ", expected, actual);");
+                                     return;
+                                 }
+
                                  w.If("context.IsRecordingMismatch", () =>
                                  {
-                                     w.Line("using var path = context.AtMember(" + Microsoft.CodeAnalysis.CSharp.SymbolDisplay.FormatLiteral(member.Name, true) + ");");
+                                     w.Line("using var path = context.AtMember(" + literalName + ");");
                                      w.Line("if (!CompareMember()) return context.RecordMismatch(expected, actual);");
                                  }).ElseIf("!CompareMember()", () => w.Line("return false;"));
                                  w.Method("bool CompareMember()", () =>
@@ -235,9 +251,23 @@ internal sealed class EqualityEmitter
         w.Line();
     }
 
+    private static bool IsTerminalComparison(ITypeSymbol type, AttributeData? rule, EffectiveKind kind)
+    {
+        if (kind is EffectiveKind.Shallow or EffectiveKind.Reference or EffectiveKind.Skip ||
+            GenCommon.GetEffectiveComparerType(type, rule) is not null)
+            return true;
+
+        if (type is INamedTypeSymbol nullable && nullable.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T)
+            return IsTerminalComparison(nullable.TypeArguments[0], rule, EffectiveKind.Deep);
+
+        return type.SpecialType == SpecialType.System_String || type.TypeKind == TypeKind.Enum ||
+            GenCommon.IsWellKnownStruct(type) || (type.IsValueType && type.SpecialType != SpecialType.None);
+    }
+
     private void EmitMember(CodeWriter w, INamedTypeSymbol owner, EqualityMemberSymbol equalityMember,
         EqualityTarget root,
-        HashSet<string> emittedComparers, List<string[]> comparerDeclarations, SourceProductionContext spc)
+        HashSet<string> emittedComparers, List<string[]> comparerDeclarations, SourceProductionContext spc,
+        string failure = "return false;")
     {
         const string leftExpr = "expected";
         const string rightExpr = "actual";
@@ -283,7 +313,7 @@ internal sealed class EqualityEmitter
             {
                 w.If($"{leftExpr} is null || {rightExpr} is null", () =>
                 {
-                    w.Line("return false;");
+                    w.Line(failure);
                 });
             });
         }
@@ -292,7 +322,7 @@ internal sealed class EqualityEmitter
         {
             w.If($"!object.ReferenceEquals({leftExpr}, {rightExpr})", () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             w.Line();
             return;
@@ -309,7 +339,7 @@ internal sealed class EqualityEmitter
                    ">)new " + cmpFqn + "();");
             w.If("!" + customVar + ".Equals(" + leftExpr + ", " + rightExpr + ")", () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             w.Line();
             return;
@@ -319,7 +349,7 @@ internal sealed class EqualityEmitter
         {
             w.If("!object.Equals(" + leftExpr + ", " + rightExpr + ")", () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             w.Line();
             return;
@@ -343,7 +373,7 @@ internal sealed class EqualityEmitter
 
             w.If(leftExpr + ".HasValue != " + rightExpr + ".HasValue", () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             w.If(leftExpr + ".HasValue", () =>
             {
@@ -351,19 +381,19 @@ internal sealed class EqualityEmitter
                 {
                     w.If("!" + customVar + ".Equals(" + leftExpr + ".Value, " + rightExpr + ".Value)", () =>
                     {
-                        w.Line("return false;");
+                        w.Line(failure);
                     });
                 }
                 else
                 {
-                    EmitNullableValueCompare_NoCustom(w, leftExpr, rightExpr, valueT);
+                    EmitNullableValueCompare_NoCustom(w, leftExpr, rightExpr, valueT, failure);
                 }
             });
             w.Line();
             return;
         }
 
-        if (GenCommon.TryEmitWellKnownStructCompare(w, leftExpr, rightExpr, equalityMember.Type))
+        if (GenCommon.TryEmitWellKnownStructCompare(w, leftExpr, rightExpr, equalityMember.Type, failure))
         {
             w.Line();
             return;
@@ -373,7 +403,7 @@ internal sealed class EqualityEmitter
         {
             w.If("!DeepEqual.Generator.Shared.ComparisonHelpers.AreEqualStrings(" + leftExpr + ", " + rightExpr + ", context)", () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             w.Line();
             return;
@@ -385,7 +415,7 @@ internal sealed class EqualityEmitter
             w.If("!DeepEqual.Generator.Shared.ComparisonHelpers.AreEqualEnum<" + enumFqn + ">(" + leftExpr +
                   ", " + rightExpr + ")", () =>
                   {
-                      w.Line("return false;");
+                      w.Line(failure);
                   });
             w.Line();
             return;
@@ -396,7 +426,7 @@ internal sealed class EqualityEmitter
             var call = GenCommon.GetNumericCall(equalityMember.Type, leftExpr, rightExpr, "context");
             w.If("!" + call, () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             w.Line();
             return;
@@ -425,7 +455,7 @@ internal sealed class EqualityEmitter
                   ">(" + leftExpr + ", " + rightExpr + ", new " + cmpName + "(" + (elemCustomVar ?? "") +
                   "), context)", () =>
                   {
-                      w.Line("return false;");
+                      w.Line(failure);
                   });
             w.Line();
             return;
@@ -453,7 +483,7 @@ internal sealed class EqualityEmitter
             w.If("!DeepEqual.Generator.Shared.ComparisonHelpers.AreEqualMemory<" + elFqn + ", " + cmpName + ">(" +
                   leftExpr + ", " + rightExpr + ", new " + cmpName + "(" + (elemCustomVar ?? "") + "), context)", () =>
                   {
-                      w.Line("return false;");
+                      w.Line(failure);
                   });
             w.Line();
             return;
@@ -463,7 +493,7 @@ internal sealed class EqualityEmitter
         {
             w.If("!" + leftExpr + ".Equals(" + rightExpr + ")", () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             w.Line();
             return;
@@ -500,7 +530,7 @@ internal sealed class EqualityEmitter
                 var helper = arr.Rank == 1 ? "AreEqualArrayRank1" : "AreEqualArray";
                 w.If("!ComparisonHelpers." + helper + "<" + elFqn + ", " + cmpName + ">(" +
                      leftExpr + ", " + rightExpr + ", new " + cmpName + "(" + (elemCustomVar ?? "") + "), context)",
-                     () => w.Line("return false;"));
+                     () => w.Line(failure));
             }
 
             w.Line();
@@ -534,7 +564,7 @@ internal sealed class EqualityEmitter
             w.If("!DeepEqual.Generator.Shared.ComparisonHelpers.AreEqualDictionariesAny<" + kFqn + ", " + vFqn +
                   ", " + cmpAny + ">(" + leftExpr + ", " + rightExpr + ", new " + cmpAny + "(" + (valCustomVar ?? "") + "), context)", () =>
                   {
-                      w.Line("return false;");
+                      w.Line(failure);
                   });
             w.Line();
             return;
@@ -568,7 +598,7 @@ internal sealed class EqualityEmitter
             {
                 w.If("!ComparisonHelpers.AreEqualSequencesOrdered<" + elFqn + ", " + cmpName + ">(" +
                      leftExpr + ", " + rightExpr + ", new " + cmpName + "(" + (elemCustomVar ?? "") + "), context)",
-                     () => w.Line("return false;"));
+                     () => w.Line(failure));
             }
 
             w.Line();
@@ -584,7 +614,7 @@ internal sealed class EqualityEmitter
             w.If("!DeepEqual.Generator.Shared.ComparisonHelpers.DeepComparePolymorphic<" + declFqn + ">(" +
                   leftExpr + ", " + rightExpr + ", context)", () =>
                   {
-                      w.Line("return false;");
+                      w.Line(failure);
                   });
             w.Line();
             return;
@@ -595,7 +625,7 @@ internal sealed class EqualityEmitter
             w.If("!DeepEqual.Generator.Shared.DynamicDeepComparer.AreEqualDynamic(" + leftExpr + ", " +
                   rightExpr + ", context)", () =>
                   {
-                      w.Line("return false;");
+                      w.Line(failure);
                   });
             w.Line();
             return;
@@ -607,7 +637,7 @@ internal sealed class EqualityEmitter
             var helperExpr = GenCommon.GetHelperMethodName(nts) + "(" + leftExpr + ", " + rightExpr + ", context)";
             w.If("!" + helperExpr, () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             w.Line();
             return;
@@ -615,7 +645,7 @@ internal sealed class EqualityEmitter
 
         w.If("!object.Equals(" + leftExpr + ", " + rightExpr + ")", () =>
         {
-            w.Line("return false;");
+            w.Line(failure);
         });
         w.Line();
     }
@@ -698,9 +728,9 @@ internal sealed class EqualityEmitter
         w.If("!ComparisonHelpers." + call, () => w.Line("return false;"));
     }
 
-    private void EmitNullableValueCompare_NoCustom(CodeWriter w, string leftExpr, string rightExpr, ITypeSymbol valueType)
+    private void EmitNullableValueCompare_NoCustom(CodeWriter w, string leftExpr, string rightExpr, ITypeSymbol valueType, string failure)
     {
-        if (GenCommon.TryEmitWellKnownStructCompare(w, leftExpr + ".Value", rightExpr + ".Value", valueType)) return;
+        if (GenCommon.TryEmitWellKnownStructCompare(w, leftExpr + ".Value", rightExpr + ".Value", valueType, failure)) return;
 
         if (valueType.TypeKind == TypeKind.Enum)
         {
@@ -708,7 +738,7 @@ internal sealed class EqualityEmitter
             w.If("!DeepEqual.Generator.Shared.ComparisonHelpers.AreEqualEnum<" + enumFqn + ">(" + leftExpr +
                   ".Value, " + rightExpr + ".Value)", () =>
                   {
-                      w.Line("return false;");
+                      w.Line(failure);
                   });
             return;
         }
@@ -718,7 +748,7 @@ internal sealed class EqualityEmitter
             w.If("!DeepEqual.Generator.Shared.ComparisonHelpers.AreEqualStrings(" + leftExpr + ".Value, " +
                   rightExpr + ".Value, context)", () =>
                   {
-                      w.Line("return false;");
+                      w.Line(failure);
                   });
             return;
         }
@@ -728,7 +758,7 @@ internal sealed class EqualityEmitter
             var call = GenCommon.GetNumericCall(valueType, leftExpr + ".Value", rightExpr + ".Value", "context");
             w.If("!" + call, () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             return;
         }
@@ -737,7 +767,7 @@ internal sealed class EqualityEmitter
         {
             w.If("!" + leftExpr + ".Value.Equals(" + rightExpr + ".Value)", () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             return;
         }
@@ -750,14 +780,14 @@ internal sealed class EqualityEmitter
                              ".Value, context)";
             w.If("!" + helperExpr, () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             return;
         }
 
         w.If("!object.Equals(" + leftExpr + ".Value, " + rightExpr + ".Value)", () =>
         {
-            w.Line("return false;");
+            w.Line(failure);
         });
     }
 

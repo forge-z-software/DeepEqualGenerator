@@ -21,6 +21,27 @@ public sealed class DeepMismatchTests
     }
 
     [Fact]
+    public void OrderedListFastPathHonorsOptionsAndReportsScalarValues()
+    {
+        var expected = new OrderedLines { Lines = [new("SKU-9", 2)] };
+        var actual = new OrderedLines { Lines = [new("sku-9", 2)] };
+        var options = new ComparisonOptions { StringComparison = StringComparison.OrdinalIgnoreCase };
+
+        Assert.False(expected.AreDeepEqual(actual));
+        Assert.True(expected.AreDeepEqual(actual, options));
+        Assert.Null(expected.GetDeepMismatch(actual, options));
+
+        actual.Lines[0] = new("sku-9", 3);
+        Assert.False(expected.AreDeepEqual(actual, options));
+        Assert.Equal(new DeepMismatch("$.Lines[0].Qty", 2, 3), expected.GetDeepMismatch(actual, options));
+
+        actual.Lines[0] = null;
+        Assert.False(expected.AreDeepEqual(actual, options));
+        Assert.Equal(new DeepMismatch("$.Lines[0]", expected.Lines[0], null),
+            expected.GetDeepMismatch(actual, options));
+    }
+
+    [Fact]
     public void UniqueKeysNameTheItemEvenWhenOrderChanges()
     {
         var expected = new KeyedReceipt { Lines = [new("SKU-8", 1), new("SKU-9", 2)] };
@@ -196,6 +217,12 @@ public sealed class DeepMismatchTests
     {
         [DeepCompare(OrderInsensitive = true, KeyMembers = [nameof(Line.Sku)])]
         public List<Line> Lines { get; init; } = [];
+    }
+
+    [DeepComparable]
+    public sealed class OrderedLines
+    {
+        public List<Line?> Lines { get; init; } = [];
     }
 
     public class BaseModel

@@ -123,13 +123,13 @@ internal static class GenCommon
         }
     }
 
-    internal static bool TryEmitWellKnownStructCompare(CodeWriter w, string leftExpr, string rightExpr, ITypeSymbol type)
+    internal static bool TryEmitWellKnownStructCompare(CodeWriter w, string leftExpr, string rightExpr, ITypeSymbol type, string failure)
     {
         if (type.SpecialType == SpecialType.System_DateTime)
         {
             w.If("!DeepEqual.Generator.Shared.ComparisonHelpers.AreEqualDateTime(" + leftExpr + ", " + rightExpr + ")", () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             return true;
         }
@@ -139,7 +139,7 @@ internal static class GenCommon
         {
             w.If("!DeepEqual.Generator.Shared.ComparisonHelpers.AreEqualDateTimeOffset(" + leftExpr + ", " + rightExpr + ")", () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             return true;
         }
@@ -148,7 +148,7 @@ internal static class GenCommon
         {
             w.If(leftExpr + ".Ticks != " + rightExpr + ".Ticks", () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             return true;
         }
@@ -157,7 +157,7 @@ internal static class GenCommon
         {
             w.If("!" + leftExpr + ".Equals(" + rightExpr + ")", () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             return true;
         }
@@ -166,7 +166,7 @@ internal static class GenCommon
         {
             w.If("!DeepEqual.Generator.Shared.ComparisonHelpers.AreEqualDateOnly(" + leftExpr + ", " + rightExpr + ")", () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             return true;
         }
@@ -175,7 +175,7 @@ internal static class GenCommon
         {
             w.If("!DeepEqual.Generator.Shared.ComparisonHelpers.AreEqualTimeOnly(" + leftExpr + ", " + rightExpr + ")", () =>
             {
-                w.Line("return false;");
+                w.Line(failure);
             });
             return true;
         }

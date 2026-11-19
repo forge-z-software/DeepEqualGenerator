@@ -56,6 +56,13 @@ public sealed class ComparisonContext
         return false;
     }
 
+    public bool RecordMemberMismatch<T>(string member, T expected, T actual)
+    {
+        if (!IsRecordingMismatch) return false;
+        using var path = AtMember(member);
+        return RecordMismatch(expected, actual);
+    }
+
     private PathScope PushPath(PathSegment segment)
     {
         _path!.Add(segment);
