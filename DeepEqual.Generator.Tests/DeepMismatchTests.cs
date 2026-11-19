@@ -61,6 +61,22 @@ public sealed class DeepMismatchTests
     }
 
     [Fact]
+    public void KeyedMatchingPreservesToleranceNullKeysAndMismatchOrder()
+    {
+        var expected = new KeyedScores { Items = [null, new(null, 1), new(null, 0), new("B", 5), new("A", 3)] };
+        var actual = new KeyedScores { Items = [new("A", 3), new(null, 0), new(null, 2), new("B", 5), null] };
+        var options = new ComparisonOptions { DoubleEpsilon = 1 };
+
+        Assert.True(expected.AreDeepEqual(actual, options));
+        Assert.Null(expected.GetDeepMismatch(actual, options));
+
+        actual.Items[0] = new("A", 7);
+        actual.Items[3] = new("B", 9);
+        Assert.False(expected.AreDeepEqual(actual, options));
+        Assert.Equal(new DeepMismatch("$.Items[\"B\"].Value", 5d, 9d), expected.GetDeepMismatch(actual, options));
+    }
+
+    [Fact]
     public void DictionaryKeyRulesAreIndependentOfTheInputComparers()
     {
         var expected = new Receipt { Labels = new(StringComparer.Ordinal) { ["alpha"] = "on" } };
@@ -224,6 +240,15 @@ public sealed class DeepMismatchTests
     {
         public List<Line?> Lines { get; init; } = [];
     }
+
+    [DeepComparable]
+    public sealed class KeyedScores
+    {
+        [DeepCompare(KeyMembers = [nameof(Score.Group)])]
+        public List<Score?> Items { get; init; } = [];
+    }
+
+    public sealed record Score(string? Group, double Value);
 
     public class BaseModel
     {

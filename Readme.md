@@ -62,6 +62,12 @@ Use `BinaryDeltaCodec` to transport supported delta values between matching sche
 
 Generated diff and delta extensions require a nongeneric root. Equality and mismatch explanations also support generic roots and Native AOT. The binary codec uses runtime type construction for typed collections, so its supported deployment target is the regular .NET runtime.
 
+## Dirty bits and access tracking
+
+Add `[DeltaTrack]` to a partial model with delta generation enabled and call the generated `__MarkDirty(__Bit_PropertyName)` from the property setter. The delta generator can then use the marks to find changed members. Set `ComparisonOptions.ValidateDirtyOnEmit` to check a flagged value against the baseline before emitting an operation.
+
+Set `AccessTrack = AccessMode.Write` on `DeltaTrack` to collect write diagnostics. Choose bits, counts, or counts with the last write time through `AccessGranularity`. The generated `__DumpAccessJson()` method exposes the tracking data.
+
 ## Build and verify
 
 Use a serviced .NET 8.0.4xx SDK. Build, test, pack, and run both examples against the local feed.
@@ -79,3 +85,5 @@ dotnet run --project samples/DeltaRoundTrip/DeltaRoundTrip.csproj -c Release --n
 Install 2.0 from that local feed with `dotnet add package DeepEqual.Generator --version 2.0.0 --source <feed-path>`. For a 1.x project, remove its separate `DeepEqual.Generator.Shared` package reference and call `expected.AreDeepEqual(actual)` with `using DeepEqual;`.
 
 Run the [comparison benchmarks](DeepEqual.Generator.Benchmarking/DeepEqualityBenchmarks.cs) with `dotnet run -c Release --project DeepEqual.Generator.Benchmarking -- --filter '*DeepEqualityBenchmarks*'`. The fixture checks both comparers and the mismatch path before timing equal models and a late mismatch.
+
+Run the [feature benchmarks](DeepEqual.Generator.Benchmarking/FeaturePerformanceBenchmarks.cs) with `dotnet run -c Release --project DeepEqual.Generator.Benchmarking -- --filter '*FeaturePerformanceBenchmarks*'`. They cover arrays, dictionaries, unordered and keyed collections, polymorphism, cycles, mismatch paths, structured diffs, delta computation and application, the binary codec, and tracking. The delta application benchmark includes creating a fresh target for each patch.

@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace DeepEqual.Generator.Shared;
 
@@ -235,45 +236,86 @@ public static class ComparisonHelpers
         if (ReferenceEquals(expected, actual)) return true;
         if (expected is null || actual is null) return false;
 
-        var left = Group(expected, getKey, out var leftNulls);
-        var right = Group(actual, getKey, out var rightNulls);
-        if (leftNulls != rightNulls || left.Count != right.Count) return false;
-
-        foreach (var (key, leftBucket) in left)
+        var groups = new Dictionary<ValueTuple<TKey>, KeyedElements<T>>();
+        var expectedNulls = 0;
+        foreach (var item in expected)
         {
-            using var path = context.AtKey(key.Item1);
-            if (!right.TryGetValue(key, out var rightBucket))
-                return context.RecordMismatch<object?>(leftBucket, null);
-            if (leftBucket.Count == 1 && rightBucket.Count == 1)
+            if (item is null)
             {
-                if (!comparer.Invoke(leftBucket[0], rightBucket[0], context))
-                    return context.RecordMismatch(leftBucket[0], rightBucket[0]);
+                expectedNulls++;
+                continue;
             }
-            else if (!MatchUnordered(leftBucket, rightBucket, comparer, context))
+
+            ref var group = ref CollectionsMarshal.GetValueRefOrAddDefault(groups, ValueTuple.Create(getKey(item)), out _);
+            group.Expected.Add(item);
+        }
+
+        var expectedKeyCount = groups.Count;
+        var actualKeyCount = 0;
+        var actualNulls = 0;
+        foreach (var item in actual)
+        {
+            if (item is null)
             {
-                return context.RecordMismatch(leftBucket, rightBucket);
+                actualNulls++;
+                continue;
+            }
+
+            ref var group = ref CollectionsMarshal.GetValueRefOrAddDefault(groups, ValueTuple.Create(getKey(item)), out _);
+            if (group.Actual.Count == 0) actualKeyCount++;
+            group.Actual.Add(item);
+        }
+
+        if (expectedNulls != actualNulls || expectedKeyCount != actualKeyCount) return false;
+
+        foreach (var (key, group) in groups)
+        {
+            if (group.Expected.Count == 0) continue;
+            using var path = context.AtKey(key.Item1);
+
+            if (group.Expected.Count == 1 && group.Actual.Count == 1)
+            {
+                if (!comparer.Invoke(group.Expected.First, group.Actual.First, context))
+                    return context.RecordMismatch(group.Expected.First, group.Actual.First);
+            }
+            else if (group.Expected.Count != group.Actual.Count)
+            {
+                if (context.IsRecordingMismatch)
+                    context.RecordMismatch(group.Expected.AsList(), group.Actual.Count == 0 ? null : group.Actual.AsList());
+                return false;
+            }
+            else if (!MatchUnordered(group.Expected.Duplicates!, group.Actual.Duplicates!, comparer, context))
+            {
+                return context.RecordMismatch(group.Expected.Duplicates, group.Actual.Duplicates);
             }
         }
         return true;
+    }
 
-        static Dictionary<ValueTuple<TKey>, List<T>> Group(IEnumerable<T> items, Func<T, TKey> keySelector, out int nulls)
+    private struct KeyedElements<T>
+    {
+        internal KeyBucket<T> Expected;
+        internal KeyBucket<T> Actual;
+    }
+
+    private struct KeyBucket<T>
+    {
+        internal int Count { get; private set; }
+        internal T First { get; private set; }
+        internal List<T>? Duplicates { get; private set; }
+
+        internal void Add(T item)
         {
-            nulls = 0;
-            var groups = new Dictionary<ValueTuple<TKey>, List<T>>();
-            foreach (var item in items)
+            if (Count++ == 0)
+                First = item;
+            else
             {
-                if (item is null)
-                {
-                    nulls++;
-                    continue;
-                }
-                var key = ValueTuple.Create(keySelector(item));
-                if (!groups.TryGetValue(key, out var bucket))
-                    groups[key] = bucket = [];
-                bucket.Add(item);
+                Duplicates ??= [First];
+                Duplicates.Add(item);
             }
-            return groups;
         }
+
+        internal readonly List<T> AsList() => Duplicates ?? [First];
     }
 
     private static bool MatchUnordered<T, TComparer>(IReadOnlyList<T> a, IReadOnlyList<T> b, TComparer comparer,
