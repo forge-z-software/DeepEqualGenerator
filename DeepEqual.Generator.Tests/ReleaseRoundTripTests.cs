@@ -92,6 +92,61 @@ public sealed class ReleaseRoundTripTests
     }
 
     [Fact]
+    public void FlatDictionaryDeltasKeepRemovalsBeforeWritesAndDiffsKeepTheirOperations()
+    {
+        var original = new MutableStock
+        {
+            Locations = new(StringComparer.OrdinalIgnoreCase) { ["Old"] = 1, ["Match"] = 2, ["Other"] = 3 }
+        };
+        var desired = new MutableStock
+        {
+            Locations = new(StringComparer.OrdinalIgnoreCase) { ["match"] = 5, ["New"] = 4 }
+        };
+
+        var (hasDiff, diff) = original.GetDeepDiff(desired);
+        Assert.True(hasDiff);
+        var dictionaryDiff = Assert.IsType<DeltaDocument>(Assert.Single(diff.MemberChanges!).ValueOrDiff);
+        var (hasEqualDiff, _) = original.GetDeepDiff(new MutableStock
+        {
+            Locations = new(StringComparer.OrdinalIgnoreCase) { ["old"] = 1, ["match"] = 2, ["other"] = 3 }
+        });
+        Assert.False(hasEqualDiff);
+        AssertOperations(dictionaryDiff);
+
+        var delta = original.ComputeDeepDelta(desired);
+        AssertOperations(delta);
+        var applied = Assert.IsType<MutableStock>(original.ApplyDeepDelta(delta));
+        Assert.Same(StringComparer.OrdinalIgnoreCase, applied.Locations.Comparer);
+        Assert.Equal(2, applied.Locations.Count);
+        Assert.Equal(5, applied.Locations["match"]);
+        Assert.Equal(4, applied.Locations["New"]);
+
+        static void AssertOperations(DeltaDocument document)
+        {
+            Assert.Collection(document.Operations,
+                op => Assert.Equal((DeltaKind.DictRemove, "Old"), (op.Kind, Assert.IsType<string>(op.Key))),
+                op => Assert.Equal((DeltaKind.DictRemove, "Other"), (op.Kind, Assert.IsType<string>(op.Key))),
+                op => Assert.Equal((DeltaKind.DictSet, "match", 5), (op.Kind, Assert.IsType<string>(op.Key), Assert.IsType<int>(op.Value))),
+                op => Assert.Equal((DeltaKind.DictSet, "New", 4), (op.Kind, Assert.IsType<string>(op.Key), Assert.IsType<int>(op.Value))));
+        }
+    }
+
+    [Fact]
+    public void ListAppendFastPathLeavesMixedOperationsForTheGeneralApplyPath()
+    {
+        var document = new DeltaDocument();
+        var writer = new DeltaWriter(document);
+        writer.WriteSeqAddAt(1, 1, 2);
+        writer.WriteSeqReplaceAt(1, 0, 3);
+        var original = new List<int> { 1 };
+        object? target = original;
+
+        Assert.False(DeltaHelpers.TryApplyListSeqAddFastLane<int>(ref target, new DeltaReader(document).AsSpan()));
+        Assert.Same(original, target);
+        Assert.Equal(new[] { 1 }, original);
+    }
+
+    [Fact]
     public void KeyedListDeltaPreservesAnUpdateWhenItsElementMoves()
     {
         var original = new PickList { Lines = [new("A", 1), new("B", 1), new("C", 1)] };

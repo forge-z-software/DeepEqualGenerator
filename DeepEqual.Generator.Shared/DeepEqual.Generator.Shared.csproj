@@ -2,12 +2,12 @@
 	<PropertyGroup>
 		<TargetFramework>net8.0</TargetFramework>
 		<PackageId>DeepEqual.Generator</PackageId>
-		<Version>2.0.0</Version>
+		<Version>2.0.1</Version>
 		<Authors>Mirko Sangrigoli</Authors>
 		<Company>Quaverflow</Company>
-		<Description>Source-generated deep equality and mismatch paths for .NET models.</Description>
+		<Description>Source-generated deep equality, mismatch paths, structural diffs, and binary-serializable deltas for .NET models.</Description>
 		<PackageTags>deep-equality;source-generator;dotnet;diff</PackageTags>
-		<PackageReleaseNotes>One-package installation, generated mismatch paths, cycle-safe equality, and schema-checked binary deltas.</PackageReleaseNotes>
+		<PackageReleaseNotes>Faster generated collection comparisons, structured diffs, delta computation and application, and binary delta encoding and decoding. Preserves the BDC1 wire format.</PackageReleaseNotes>
 		<RepositoryUrl>https://github.com/Quaverflow/DeepEqualGenerator</RepositoryUrl>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 		<PackageReadmeFile>Readme.md</PackageReadmeFile>

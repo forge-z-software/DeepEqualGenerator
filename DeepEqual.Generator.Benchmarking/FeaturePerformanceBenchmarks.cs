@@ -9,6 +9,7 @@ public class FeaturePerformanceBenchmarks
 {
     private const int Size = 128;
     private static readonly BinaryDeltaOptions WireFormat = new() { IncludeHeader = true, StableTypeFingerprint = 1 };
+    private readonly PatchInventory _patchTarget = MakeInventory();
     private readonly PatchInventory _dictionaryCopy = MakeInventory();
     private readonly CountsBenchModel _access = new();
 
@@ -63,7 +64,9 @@ public class FeaturePerformanceBenchmarks
             throw new InvalidOperationException("An equality fixture returned an unexpected result.");
 
         if (!DictionaryEquality() || ComputeDiff().IsEmpty || _delta.IsEmpty ||
+            !ComputeEmptyDiff().IsEmpty || !ComputeEmptyDelta().IsEmpty ||
             !_desired.AreDeepEqual(ApplyDeltaToFreshModel()) ||
+            !_desired.AreDeepEqual(ApplyDeltaOnly()) ||
             !_desired.AreDeepEqual(MakeInventory().ApplyDeepDelta(DecodeDelta())) ||
             _dirtyBefore.ApplyDeepDelta(ComputeDirtyDelta())?.Quantity != 3)
             throw new InvalidOperationException("A diff or delta fixture failed its round-trip check.");
@@ -83,6 +86,11 @@ public class FeaturePerformanceBenchmarks
     [Benchmark] public bool DictionaryEquality() => _before.AreDeepEqual(_dictionaryCopy);
     [Benchmark] public Diff<PatchInventory> ComputeDiff() => _before.GetDeepDiff(_desired).diff;
     [Benchmark] public DeltaDocument ComputeDelta() => _before.ComputeDeepDelta(_desired);
+    [Benchmark] public Diff<PatchInventory> ComputeEmptyDiff() => _before.GetDeepDiff(_dictionaryCopy).diff;
+    [Benchmark] public DeltaDocument ComputeEmptyDelta() => _before.ComputeDeepDelta(_dictionaryCopy);
+
+    // The fixture's scalar and dictionary updates can be replayed on the same target.
+    [Benchmark] public PatchInventory? ApplyDeltaOnly() => _patchTarget.ApplyDeepDelta(_delta);
 
     // Include constructing the mutable target so every operation applies to the original state.
     [Benchmark] public PatchInventory? ApplyDeltaToFreshModel() => MakeInventory().ApplyDeepDelta(_delta);
@@ -96,6 +104,14 @@ public class FeaturePerformanceBenchmarks
     }
 
     [Benchmark] public DeltaDocument DecodeDelta() => BinaryDeltaCodec.Read(_encoded, WireFormat);
+
+    [Benchmark]
+    public int EncodeDeltaWithoutTables()
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        BinaryDeltaCodec.Write(_delta, buffer);
+        return buffer.WrittenCount;
+    }
 
     [Benchmark]
     public DeltaDocument ComputeDirtyDelta()

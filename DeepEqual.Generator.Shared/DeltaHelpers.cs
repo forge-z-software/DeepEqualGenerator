@@ -333,116 +333,81 @@ public static class DeltaHelpers
         target = clone;
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static bool TryApplyListSeqAddFastLane<T>(ref object? target, ReadOnlySpan<DeltaOp> ops)
+    public static List<DeltaOp>? NormalizeSequenceOperations(ReadOnlySpan<DeltaOp> operations)
     {
-        if (ops.Length == 0)
-            return false;
-
-        var expectedMember = ops[0].MemberIndex;
-        if (expectedMember < 0)
-            return false;
-
-        List<T>? list;
-
-        if (target is List<T> existing)
+        var seen = new HashSet<(int Member, int Index, DeltaKind Kind)>();
+        List<DeltaOp>? normalized = null;
+        for (var index = 0; index < operations.Length; index++)
         {
-            list = existing;
-        }
-        else if (target is null)
-        {
-            list = new List<T>(ops.Length);
-            target = list;
-        }
-        else
-        {
-            return false;
-        }
-
-        var baseSpan = CollectionsMarshal.AsSpan(list);
-        var baseCount = baseSpan.Length;
-        var comparer = EqualityComparer<T>.Default;
-        var isRefType = !typeof(T).IsValueType;
-
-        var currentCount = baseCount;
-        var prevIndex = -1;
-        var ensureCapacityDone = false;
-
-        var hasLast = baseCount > 0;
-        T lastValue = hasLast ? baseSpan[baseCount - 1] : default!;
-
-        for (var i = 0; i < ops.Length; i++)
-        {
-            ref readonly var op = ref ops[i];
-
-            if (op.Kind != DeltaKind.SeqAddAt || op.MemberIndex != expectedMember)
-                return false;
-
-            var rawIndex = op.Index;
-            if (rawIndex < 0)
-                return false;
-
-            if (rawIndex <= prevIndex)
-                return false;
-
-            prevIndex = rawIndex;
-
-            var value = (T)op.Value!;
-
-            if (rawIndex < baseCount)
+            ref readonly var operation = ref operations[index];
+            if (operation.Kind is DeltaKind.SeqAddAt or DeltaKind.SeqRemoveAt &&
+                !seen.Add((operation.MemberIndex, operation.Index, operation.Kind)))
             {
-                var existingValue = baseSpan[rawIndex];
-                bool equal;
-                if (isRefType)
+                if (normalized is null)
                 {
-                    equal = ReferenceEquals(existingValue, value) || comparer.Equals(existingValue, value);
+                    normalized = new List<DeltaOp>(operations.Length - 1);
+                    for (var prefix = 0; prefix < index; prefix++)
+                        normalized.Add(operations[prefix]);
                 }
-                else
-                {
-                    equal = comparer.Equals(existingValue, value);
-                }
-
-                if (!equal)
-                    return false;
-
-                if (rawIndex == baseCount - 1)
-                {
-                    lastValue = existingValue;
-                    hasLast = true;
-                }
-
                 continue;
             }
 
-            if (rawIndex != currentCount)
+            normalized?.Add(operation);
+        }
+
+        return normalized;
+    }
+
+    public static bool TryApplyListSeqAddFastLane<T>(ref object? target, ReadOnlySpan<DeltaOp> ops)
+    {
+        if (ops.IsEmpty || ops[0].MemberIndex < 0) return false;
+        var list = target as List<T>;
+        if (target is not null && list is null) return false;
+
+        var expectedMember = ops[0].MemberIndex;
+        var prefix = CollectionsMarshal.AsSpan(list);
+        var comparer = EqualityComparer<T>.Default;
+        var count = prefix.Length;
+        var previousIndex = -1;
+        var firstAppend = ops.Length;
+        var last = prefix.IsEmpty ? default! : prefix[^1];
+
+        // Validate the entire fast path before touching a target the fallback might reuse.
+        for (var i = 0; i < ops.Length; i++)
+        {
+            ref readonly var operation = ref ops[i];
+            var index = operation.Index;
+            if (operation.Kind != DeltaKind.SeqAddAt || operation.MemberIndex != expectedMember ||
+                index <= previousIndex || index > count)
                 return false;
 
-            if (!ensureCapacityDone)
+            previousIndex = index;
+            var value = (T)operation.Value!;
+            if (index < prefix.Length)
             {
-                list.EnsureCapacity(currentCount + (ops.Length - i));
-                baseSpan = CollectionsMarshal.AsSpan(list);
-                ensureCapacityDone = true;
+                if (!AreSame(prefix[index], value)) return false;
+                continue;
             }
 
-            if (hasLast)
-            {
-                bool same = isRefType
-                    ? ReferenceEquals(lastValue, value) || comparer.Equals(lastValue, value)
-                    : comparer.Equals(lastValue, value);
-                if (same)
-                    continue;
-            }
+            if (index != count) return false;
+            if (count > 0 && AreSame(last, value)) continue;
 
-            list.Add(value);
-            currentCount++;
-            lastValue = value;
-            hasLast = true;
+            if (firstAppend == ops.Length) firstAppend = i;
+            count++;
+            last = value;
         }
+
+        list ??= new List<T>(count);
+        list.EnsureCapacity(count);
+        for (var i = firstAppend; list.Count < count; i++)
+            list.Add((T)ops[i].Value!);
 
         target = list;
         return true;
-    }
 
+        bool AreSame(T left, T right) =>
+            (!typeof(T).IsValueType && ReferenceEquals(left, right)) || comparer.Equals(left, right);
+    }
 
     public static void ComputeListDeltaNested<T>(
         IList<T>? left,
@@ -986,6 +951,81 @@ public static class DeltaHelpers
     // DICTIONARIES
     // ------------------------------------------------------------
 
+    public static bool TryComputeFlatDictionaryDelta<TKey, TValue>(
+        object? left, object? right, int memberIndex, ref DeltaWriter writer, ComparisonContext context)
+        where TKey : notnull
+    {
+        if (left?.GetType() != typeof(Dictionary<TKey, TValue>) ||
+            right?.GetType() != typeof(Dictionary<TKey, TValue>))
+            return false;
+
+        var before = (Dictionary<TKey, TValue>)left;
+        var after = (Dictionary<TKey, TValue>)right;
+        if (!ReferenceEquals(before.Comparer, after.Comparer))
+            return false;
+        if (ReferenceEquals(before, after)) return true;
+
+        var comparer = default(DefaultElementComparer<TValue>);
+        var operations = writer.Document.Ops;
+        var start = operations.Count;
+        var matches = 0;
+
+        foreach (var (key, value) in after)
+        {
+            if (before.TryGetValue(key, out var previous))
+            {
+                matches++;
+                if (comparer.Invoke(previous, value, context)) continue;
+            }
+
+            writer.WriteDictSet(memberIndex, key, value);
+        }
+
+        if (matches == before.Count) return true;
+
+        var updates = operations.Count - start;
+        foreach (var pair in before)
+            if (!after.ContainsKey(pair.Key))
+                writer.WriteDictRemove(memberIndex, pair.Key);
+
+        // Keep removals before updates, as in the general dictionary path.
+        if (updates != 0)
+        {
+            var range = CollectionsMarshal.AsSpan(operations)[start..];
+            range[..updates].Reverse();
+            range[updates..].Reverse();
+            range.Reverse();
+        }
+
+        return true;
+    }
+
+    public static bool TryGetDictionaryDiff<TKey, TValue>(
+        object left, object right, bool nestedValues, ComparisonContext context, out DeltaDocument? changes)
+        where TKey : notnull
+    {
+        changes = null;
+        var document = DeltaDocument.Rent();
+        try
+        {
+            var writer = new DeltaWriter(document);
+            if (left is IDictionary<TKey, TValue> leftMap && right is IDictionary<TKey, TValue> rightMap)
+                ComputeDictDelta(leftMap, rightMap, 0, ref writer, nestedValues, context);
+            else if (left is IReadOnlyDictionary<TKey, TValue> leftReadOnly &&
+                     right is IReadOnlyDictionary<TKey, TValue> rightReadOnly)
+                ComputeReadOnlyDictDelta(leftReadOnly, rightReadOnly, 0, ref writer, nestedValues, context);
+            else
+                return false;
+
+            if (!document.IsEmpty) changes = document;
+            return true;
+        }
+        finally
+        {
+            if (changes is null) DeltaDocument.Return(document);
+        }
+    }
+
     public static void ComputeDictDelta<TKey, TValue>(
         IDictionary<TKey, TValue>? left,
         IDictionary<TKey, TValue>? right,
@@ -1002,6 +1042,9 @@ public static class DeltaHelpers
             writer.WriteSetMember(memberIndex, right);
             return;
         }
+
+        if (!nestedValues && TryComputeFlatDictionaryDelta<TKey, TValue>(left, right, memberIndex, ref writer, context))
+            return;
 
         // removals (avoid double hashing)
         foreach (var kv in left)
@@ -1085,6 +1128,9 @@ public static class DeltaHelpers
             writer.WriteSetMember(memberIndex, right);
             return;
         }
+
+        if (!nestedValues && TryComputeFlatDictionaryDelta<TKey, TValue>(left, right, memberIndex, ref writer, context))
+            return;
 
         // removals
         foreach (var kv in left)

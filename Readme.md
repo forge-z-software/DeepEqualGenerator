@@ -82,8 +82,8 @@ dotnet restore samples/DeltaRoundTrip/DeltaRoundTrip.csproj --source artifacts/p
 dotnet run --project samples/DeltaRoundTrip/DeltaRoundTrip.csproj -c Release --no-restore
 ```
 
-Install 2.0 from that local feed with `dotnet add package DeepEqual.Generator --version 2.0.0 --source <feed-path>`. For a 1.x project, remove its separate `DeepEqual.Generator.Shared` package reference and call `expected.AreDeepEqual(actual)` with `using DeepEqual;`.
+Install 2.0.1 from that local feed with `dotnet add package DeepEqual.Generator --version 2.0.1 --source <feed-path>`. For a 1.x project, remove its separate `DeepEqual.Generator.Shared` package reference and call `expected.AreDeepEqual(actual)` with `using DeepEqual;`.
 
 Run the [comparison benchmarks](DeepEqual.Generator.Benchmarking/DeepEqualityBenchmarks.cs) with `dotnet run -c Release --project DeepEqual.Generator.Benchmarking -- --filter '*DeepEqualityBenchmarks*'`. The fixture checks both comparers and the mismatch path before timing equal models and a late mismatch.
 
-Run the [feature benchmarks](DeepEqual.Generator.Benchmarking/FeaturePerformanceBenchmarks.cs) with `dotnet run -c Release --project DeepEqual.Generator.Benchmarking -- --filter '*FeaturePerformanceBenchmarks*'`. They cover arrays, dictionaries, unordered and keyed collections, polymorphism, cycles, mismatch paths, structured diffs, delta computation and application, the binary codec, and tracking. The delta application benchmark includes creating a fresh target for each patch.
+Run the [feature benchmarks](DeepEqual.Generator.Benchmarking/FeaturePerformanceBenchmarks.cs) with `dotnet run -c Release --project DeepEqual.Generator.Benchmarking -- --filter '*FeaturePerformanceBenchmarks*'`. They cover arrays, dictionaries, unordered and keyed collections, polymorphism, cycles, mismatch paths, structured diffs, delta computation and application, the binary codec, and tracking. The benchmarks time changed and unchanged models, patch application on its own and with a fresh target, and binary encoding with and without tables.

@@ -62,6 +62,24 @@ public class BinaryDeltaCodecTests
         yield return new object[] { (Func<DeltaDocument>)CreateNestedDocument, (Func<BinaryDeltaOptions>)(() => new BinaryDeltaOptions { IncludeHeader = true, UseStringTable = true, UseTypeTable = true }) };
         yield return new object[] { (Func<DeltaDocument>)CreateNestedDocument, (Func<BinaryDeltaOptions>)(() => new BinaryDeltaOptions { IncludeHeader = true, UseStringTable = true, UseTypeTable = true, IncludeEnumTypeIdentity = false }) };
     }
+
+    [Theory]
+    [InlineData(true, "42444331012A010203736B750F636166C3A92D77617265686F75736503010E100014161000100114160F047261636B07D804")]
+    [InlineData(false, "03010E0F03736B7514160F03736B750F0F636166C3A92D77617265686F75736514160F047261636B07D804")]
+    public void EncodingAndDecodingRemainCompatibleWithThePreviousWireFormat(bool includeHeader, string previousEncoding)
+    {
+        var document = new DeltaDocument();
+        var writer = new DeltaWriter(document);
+        writer.WriteSetMember(7, "sku");
+        writer.WriteDictSet(11, "sku", "caf\u00e9-warehouse");
+        writer.WriteDictSet(11, "rack", 300);
+        var options = new BinaryDeltaOptions { IncludeHeader = includeHeader, StableTypeFingerprint = includeHeader ? 42UL : 0UL };
+        var previousBytes = Convert.FromHexString(previousEncoding);
+
+        Assert.Equal(previousBytes, Encode(document, options));
+        AssertDocsEqual(document, BinaryDeltaCodec.Read(previousBytes, options), options, "previous format");
+    }
+
     /// <summary>Round-trips representative documents across supported codec option matrices.</summary>
     [Theory]
     [MemberData(nameof(RoundTripCases))]
