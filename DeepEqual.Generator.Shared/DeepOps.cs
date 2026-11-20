@@ -20,6 +20,14 @@ namespace DeepEqual
             return context.Mismatch;
         }
 
+        public static DeepChangeReport DescribeChanges(object? before, object? after, ComparisonOptions? options = null,
+            int maxChanges = 100)
+        {
+            var context = ComparisonContext.ForReport(options, maxChanges);
+            if (!DynamicDeepComparer.AreEqualDynamic(before, after, context)) context.RecordMismatch(before, after);
+            return context.GetReport();
+        }
+
         private static (bool has, DeepEqual.Generator.Shared.IDiff diff)
             GetDiffCore(object? a, object? b, DeepEqual.Generator.Shared.ComparisonContext ctx)
         {

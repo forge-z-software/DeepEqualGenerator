@@ -2,12 +2,12 @@
 	<PropertyGroup>
 		<TargetFramework>net8.0</TargetFramework>
 		<PackageId>DeepEqual.Generator</PackageId>
-		<Version>2.0.1</Version>
+		<Version>2.1.0</Version>
 		<Authors>Mirko Sangrigoli</Authors>
 		<Company>Quaverflow</Company>
 		<Description>Source-generated deep equality, mismatch paths, structural diffs, and binary-serializable deltas for .NET models.</Description>
 		<PackageTags>deep-equality;source-generator;dotnet;diff</PackageTags>
-		<PackageReleaseNotes>Faster generated collection comparisons, structured diffs, delta computation and application, and binary delta encoding and decoding. Preserves the BDC1 wire format.</PackageReleaseNotes>
+		<PackageReleaseNotes>Readable change reports, generated model explanations, reusable comparison profiles, checked revisioned sync, and registered binary value types.</PackageReleaseNotes>
 		<RepositoryUrl>https://github.com/Quaverflow/DeepEqualGenerator</RepositoryUrl>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 		<PackageReadmeFile>Readme.md</PackageReadmeFile>
@@ -24,13 +24,18 @@
 		<PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
 		<ProjectReference Include="..\DeepEqual.Generator\DeepEqual.Generator.csproj"
 			ReferenceOutputAssembly="false" PrivateAssets="all" />
+		<ProjectReference Include="..\DeepEqual.Generator.CodeFixes\DeepEqual.Generator.CodeFixes.csproj"
+			ReferenceOutputAssembly="false" PrivateAssets="all" />
 	</ItemGroup>
 
 	<ItemGroup>
 		<None Include="..\Readme.md" Pack="true" PackagePath="\" />
+		<None Include="..\docs\*.md" Pack="true" PackagePath="docs" />
 		<None Include="..\LICENSE" Pack="true" PackagePath="\" />
 		<None Include="..\icon.png" Pack="true" PackagePath="\" />
 		<None Include="..\DeepEqual.Generator\bin\$(Configuration)\netstandard2.0\DeepEqual.Generator.dll"
+			Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+		<None Include="..\DeepEqual.Generator.CodeFixes\bin\$(Configuration)\netstandard2.0\DeepEqual.Generator.CodeFixes.dll"
 			Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
 	</ItemGroup>
 </Project>

@@ -861,7 +861,9 @@ public static class DeltaHelpers
             var value = left[i];
             if (value is null || keySelector(value) is not { } key || !leftLookup.TryAdd(key, (i, value)))
             {
-                writer.WriteSetMember(memberIndex, new List<T>(right));
+                if (!ComparisonHelpers.AreEqualSequencesByKey(left, right, keySelector,
+                        new DeepPolymorphicElementComparer<T>(), context))
+                    writer.WriteSetMember(memberIndex, new List<T>(right));
                 return;
             }
             leftOrder[i] = key;
@@ -875,7 +877,9 @@ public static class DeltaHelpers
             var value = right[i];
             if (value is null || keySelector(value) is not { } key || !rightKeySet.Add(key))
             {
-                writer.WriteSetMember(memberIndex, new List<T>(right));
+                if (!ComparisonHelpers.AreEqualSequencesByKey(left, right, keySelector,
+                        new DeepPolymorphicElementComparer<T>(), context))
+                    writer.WriteSetMember(memberIndex, new List<T>(right));
                 return;
             }
             rightKeys[i] = key;
@@ -892,16 +896,6 @@ public static class DeltaHelpers
                     break;
                 }
 
-        // Position-based operations are ambiguous if a changed key also moves during insertion or removal.
-        if (membershipChanged)
-            for (var i = 0; i < rightCount; i++)
-                if (leftLookup.TryGetValue(rightKeys[i], out var entry) && entry.Index != i &&
-                    !elementComparer.AreEqual(entry.Value, right[i]))
-                {
-                    writer.WriteSetMember(memberIndex, new List<T>(right));
-                    return;
-                }
-
         for (int i = leftOrder.Length - 1; i >= 0; i--)
         {
             var key = leftOrder[i];
@@ -912,17 +906,27 @@ public static class DeltaHelpers
             }
         }
 
-        // Adds + nested updates (right-side ordering)
-        for (int i = 0; i < rightKeys.Length; i++)
+        if (membershipChanged)
+        {
+            for (var i = 0; i < rightKeys.Length; i++)
+                if (!leftLookup.ContainsKey(rightKeys[i]))
+                    writer.WriteSeqAddAt(memberIndex, i, right[i]);
+
+            // Retain the relative order of surviving keys. Insertions occupy their right-side slots.
+            var index = 0;
+            foreach (var key in leftOrder)
+            {
+                if (!rightKeySet.Contains(key)) continue;
+                while (!leftLookup.ContainsKey(rightKeys[index])) index++;
+                leftLookup[key] = (index++, leftLookup[key].Value);
+            }
+        }
+
+        for (var i = 0; i < rightKeys.Length; i++)
         {
             var key = rightKeys[i];
+            if (!leftLookup.TryGetValue(key, out var leftEntry)) continue;
             var rightValue = right[i];
-
-            if (!leftLookup.TryGetValue(key, out var leftEntry))
-            {
-                writer.WriteSeqAddAt(memberIndex, i, rightValue);
-                continue;
-            }
 
             var leftValue = leftEntry.Value;
             if (elementComparer.AreEqual(leftValue, rightValue))
@@ -961,7 +965,7 @@ public static class DeltaHelpers
 
         var before = (Dictionary<TKey, TValue>)left;
         var after = (Dictionary<TKey, TValue>)right;
-        if (!ReferenceEquals(before.Comparer, after.Comparer))
+        if (!ComparisonHelpers.UsesDefaultKeys(before) || !ComparisonHelpers.UsesDefaultKeys(after))
             return false;
         if (ReferenceEquals(before, after)) return true;
 
@@ -997,6 +1001,50 @@ public static class DeltaHelpers
             range.Reverse();
         }
 
+        return true;
+    }
+
+    public static bool CanApplyDictionaryInPlace<TKey, TValue>(object? left, object? right, ComparisonContext context)
+        where TKey : notnull
+    {
+        if (ReferenceEquals(left, right)) return true;
+        if (left is Dictionary<TKey, TValue> before && right is Dictionary<TKey, TValue> after &&
+            (ComparisonHelpers.UsesDefaultKeys(before) || ReferenceEquals(before.Comparer, after.Comparer)))
+            return true;
+        if (left is System.Dynamic.ExpandoObject && right is System.Dynamic.ExpandoObject) return true;
+        return ComparisonHelpers.AreEqualDictionariesAny<TKey, TValue, DeepPolymorphicElementComparer<TValue>>(
+            left, right, default, context);
+    }
+
+    public static bool TryComputeDictionaryWithCustomKeys<TKey, TValue>(object left, object right,
+        int memberIndex, ref DeltaWriter writer, bool nestedValues, ComparisonContext context)
+        where TKey : notnull
+    {
+        if (left is System.Dynamic.ExpandoObject && right is System.Dynamic.ExpandoObject) return false;
+
+        if (left is Dictionary<TKey, TValue> before && right is Dictionary<TKey, TValue> after)
+        {
+            if (ComparisonHelpers.UsesDefaultKeys(before) && ComparisonHelpers.UsesDefaultKeys(after))
+                return false;
+
+            // A shared comparer guarantees that the desired keys can coexist on the target.
+            if (ReferenceEquals(before.Comparer, after.Comparer) &&
+                ComparisonHelpers.NormalizeMap(before) is { } normalizedBefore &&
+                ComparisonHelpers.NormalizeMap(after) is { } normalizedAfter)
+            {
+                ComputeDictDelta(normalizedBefore, normalizedAfter, memberIndex, ref writer, nestedValues, context);
+                return true;
+            }
+        }
+        else if (left is not IEnumerable<KeyValuePair<TKey, TValue>> ||
+                 right is not IEnumerable<KeyValuePair<TKey, TValue>>)
+        {
+            return false;
+        }
+
+        if (!ComparisonHelpers.AreEqualDictionariesAny<TKey, TValue, DeepPolymorphicElementComparer<TValue>>(
+                left, right, default, context))
+            writer.WriteSetMember(memberIndex, right);
         return true;
     }
 
@@ -1043,6 +1091,9 @@ public static class DeltaHelpers
             return;
         }
 
+        if (TryComputeDictionaryWithCustomKeys<TKey, TValue>(left, right, memberIndex, ref writer, nestedValues, context))
+            return;
+
         if (!nestedValues && TryComputeFlatDictionaryDelta<TKey, TValue>(left, right, memberIndex, ref writer, context))
             return;
 
@@ -1083,18 +1134,6 @@ public static class DeltaHelpers
                     if (!had) writer.WriteDictSet(memberIndex, k, rv);
                     continue;
                 }
-
-                // 2) Any IReadOnlyDictionary<,> (held as object)
-                if (IsReadOnlyDictionary(lo, out var lro) && IsReadOnlyDictionary(ro, out var rro))
-                {
-                    var scope = writer.BeginDictNested(memberIndex, k, out var w);
-                    ComputeReadOnlyDictDeltaUntyped(lro!, rro!, /*memberIndex*/ 0, ref w, /*nestedValues*/ true, context);
-                    var had = !w.Document.IsEmpty;
-                    scope.Dispose();
-                    if (!had) writer.WriteDictSet(memberIndex, k, rv);
-                    continue;
-                }
-
                 // 3) Same runtime type with generated helper
                 if (lo is not null && ro is not null && ReferenceEquals(lo.GetType(), ro.GetType()))
                 {
@@ -1128,6 +1167,9 @@ public static class DeltaHelpers
             writer.WriteSetMember(memberIndex, right);
             return;
         }
+
+        if (TryComputeDictionaryWithCustomKeys<TKey, TValue>(left, right, memberIndex, ref writer, nestedValues, context))
+            return;
 
         if (!nestedValues && TryComputeFlatDictionaryDelta<TKey, TValue>(left, right, memberIndex, ref writer, context))
             return;
@@ -1178,18 +1220,6 @@ public static class DeltaHelpers
                 if (!had) writer.WriteDictSet(memberIndex, k, rv);
                 continue;
             }
-
-            // 2) Any IReadOnlyDictionary<,> (held as object)
-            if (IsReadOnlyDictionary(lo, out var lro) && IsReadOnlyDictionary(ro, out var rro))
-            {
-                var scope = writer.BeginDictNested(memberIndex, k, out var w);
-                ComputeReadOnlyDictDeltaUntyped(lro!, rro!, /*memberIndex*/ 0, ref w, /*nestedValues*/ true, context);
-                var had = !w.Document.IsEmpty;
-                scope.Dispose();
-                if (!had) writer.WriteDictSet(memberIndex, k, rv);
-                continue;
-            }
-
             // 3) Same-type generated helper
             var tL = lo.GetType();
             var tR = ro.GetType();
@@ -1213,6 +1243,7 @@ public static class DeltaHelpers
     /// Untyped variant for any IReadOnlyDictionary&lt;TKey,TValue&gt; held as object.
     /// Builds dict ops directly into <paramref name="writer"/> at <paramref name="memberIndex"/>.
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.RequiresUnreferencedCode("Untyped dictionaries need runtime member metadata. Use a generated typed patch with trimming.")]
     public static void ComputeReadOnlyDictDeltaUntyped(
         object leftRO,
         object rightRO,
@@ -1418,20 +1449,6 @@ public static class DeltaHelpers
                     curVal = inner!;
                 }
                 return;
-            }
-
-            // Any IReadOnlyDictionary<,> — don't mutate via nested delta
-            var ifaces = curVal?.GetType().GetInterfaces();
-            if (ifaces != null)
-            {
-                foreach (var it in ifaces)
-                {
-                    if (it.IsGenericType && it.GetGenericTypeDefinition() == typeof(IReadOnlyDictionary<,>))
-                    {
-                        // no-op
-                        return;
-                    }
-                }
             }
 
             // Fallback: same-type generated helper

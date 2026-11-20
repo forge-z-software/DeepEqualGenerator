@@ -9,22 +9,22 @@ public class DeepEqualityBenchmarks
     private BenchmarkOrder _expected = null!;
     private BenchmarkOrder _actual = null!;
 
-    [Params(false, true)]
-    public bool ChangeLastQuantity { get; set; }
+    [Params(-1, 0, 127)]
+    public int ChangedIndex { get; set; }
 
     [GlobalSetup]
     public void Setup()
     {
         _expected = MakeOrder();
         _actual = MakeOrder();
-        if (ChangeLastQuantity)
-            _actual.Lines[^1] = _actual.Lines[^1] with { Qty = 3 };
+        if (ChangedIndex >= 0)
+            _actual.Lines[ChangedIndex] = _actual.Lines[ChangedIndex] with { Qty = 3 };
 
-        var expectedResult = !ChangeLastQuantity;
+        var expectedResult = ChangedIndex < 0;
         var mismatch = Explain();
         if (Handwritten() != expectedResult || Generated() != expectedResult ||
             (expectedResult ? mismatch is not null :
-                mismatch is not { Path: "$.Lines[127].Qty", Expected: 2, Actual: 3 }))
+                mismatch is not { Expected: 2, Actual: 3 } || mismatch.Path != $"$.Lines[{ChangedIndex}].Qty"))
             throw new InvalidOperationException("A benchmark comparison returned an unexpected result.");
     }
 

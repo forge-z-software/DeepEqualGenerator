@@ -11,7 +11,14 @@ namespace DeepEqual.Generator;
 internal sealed class EqualityEmitter
 {
     private const string DeepCompareAttributeName = GenCommon.DeepCompareAttributeMetadataName;
-    public void EmitForRoot(SourceProductionContext spc, EqualityTarget root, string? hintOverride = null)
+    internal static string RootComparer(INamedTypeSymbol root) => "__CompareRoot_" + GenCommon.SanitizeIdentifier(
+        GenCommon.SanitizeFileName(root.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) + "_DeepEqual.g.cs"));
+
+    internal static string PatchCompareName(INamedTypeSymbol owner, string member) =>
+        "__PatchCompare_" + GenCommon.SanitizeIdentifier(owner.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) + "." + member);
+
+    public void EmitForRoot(SourceProductionContext spc, EqualityTarget root, string? hintOverride = null,
+        bool replacementDiff = false, bool replacementDelta = false, bool patchComparers = false)
     {
         var rootFqn = root.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
         var hintName = hintOverride ?? GenCommon.SanitizeFileName(rootFqn + ".DeepOpsExtensions.Equality.g.cs");
@@ -24,7 +31,7 @@ internal sealed class EqualityEmitter
         var methodTypeParameters = GenCommon.GetTypeParameterList(root.Type);
         var methodConstraints = GenCommon.GetTypeConstraintClauses(root.Type);
         var nullSuffix = root.Type.IsReferenceType ? "?" : string.Empty;
-        var rootComparer = "__CompareRoot_" + GenCommon.SanitizeIdentifier(hintName);
+        var rootComparer = RootComparer(root.Type);
         var rootComparerType = rootComparer + methodTypeParameters;
         var helperName = GenCommon.GetHelperMethodName(root.Type);
 
@@ -107,13 +114,41 @@ internal sealed class EqualityEmitter
                     w.Line("return context.Mismatch;");
                 });
 
+                w.Method(accessibility + " static DeepModel ExplainDeepModel" + methodTypeParameters +
+                    "(this " + rootFqn + nullSuffix + " model)" + methodConstraints, () =>
+                    w.Line("return " + rootComparerType + ".Model;"));
+
+                var reportSignature = accessibility + " static DeepChangeReport DescribeDeepChanges" + methodTypeParameters +
+                    "(this " + rootFqn + nullSuffix + " before, " + rootFqn + nullSuffix +
+                    " after, ComparisonOptions? options = null, int maxChanges = 100)" + methodConstraints;
+                w.Method(reportSignature, () =>
+                {
+                    w.Line("var context = ComparisonContext.ForReport(options, maxChanges, " +
+                           (trackCycles ? "true" : "false") + ");");
+                    w.Line("if (!AreDeepEqual(before, after, context)) context.RecordMismatch(before, after);");
+                    w.Line("return context.GetReport();");
+                });
+                w.Method(accessibility + " static void AssertDeepEqual" + methodTypeParameters +
+                    "(this " + rootFqn + nullSuffix + " expected, " + rootFqn + nullSuffix +
+                    " actual, ComparisonOptions? options = null, ChangeFormatOptions? format = null, int maxChanges = 20)" +
+                    methodConstraints, () =>
+                {
+                    w.Line("if (!AreDeepEqual(expected, actual, options is null ? null : new ComparisonContext(options)))");
+                    w.Line("    throw new DeepComparisonException(DescribeDeepChanges(expected, actual, options, maxChanges), format);");
+                });
+
+                if (replacementDiff || replacementDelta)
+                    EmitReplacementApis(w, root, accessibility, rootFqn + nullSuffix, rootFqn, methodTypeParameters,
+                        methodConstraints, replacementDiff, replacementDelta);
+
                 w.Open("private static class " + rootComparerType + methodConstraints, () =>
                 {
+                    EmitModel(w, root, reachable, trackCycles);
                     var emittedComparers = new HashSet<string>(StringComparer.Ordinal);
                     var comparerDeclarations = new List<string[]>();
                     foreach (var t in reachable.OrderBy(t => t.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                                  StringComparer.Ordinal))
-                        EmitHelperForType(w, t, root, trackCycles, emittedComparers, comparerDeclarations, spc);
+                        EmitHelperForType(w, t, root, trackCycles, emittedComparers, comparerDeclarations, spc, patchComparers);
 
                     foreach (var block in comparerDeclarations)
                         foreach (var line in block)
@@ -130,8 +165,117 @@ internal sealed class EqualityEmitter
         spc.AddSource(hintName, SourceText.From(formatted, Encoding.UTF8));
     }
 
+    private static void EmitReplacementApis(CodeWriter w, EqualityTarget root, string accessibility, string argumentType,
+        string rootType, string parameters, string constraints, bool diff, bool delta)
+    {
+        if (diff)
+            w.Method($"{accessibility} static (bool has, Diff<{rootType}> diff) GetDeepDiff{parameters}" +
+                     $"(this {argumentType} before, {argumentType} after, ComparisonContext? ctx = null){constraints}", () =>
+            {
+                w.Line($"return AreDeepEqual(before, after, ctx) ? (false, Diff<{rootType}>.Empty) : (true, Diff<{rootType}>.Replacement(after));");
+            });
+        if (!delta) return;
+
+        w.Method($"{accessibility} static DeltaDocument ComputeDeepDelta{parameters}" +
+                 $"(this {argumentType} before, {argumentType} after, ComparisonContext? ctx = null){constraints}", () =>
+        {
+            w.Line($"var document = DeltaDocument.ForRoot<{rootType}>();");
+            w.Line("if (!AreDeepEqual(before, after, ctx)) new DeltaWriter(document).WriteReplaceObject(after);");
+            w.Line("return document;");
+        });
+
+        var returnsRoot = !root.Type.IsValueType;
+        w.Method($"{accessibility} static {(returnsRoot ? argumentType : "void")} ApplyDeepDelta{parameters}" +
+                 $"(this {(returnsRoot ? "" : "ref ")}{argumentType} target, DeltaDocument delta){constraints}", () =>
+        {
+            w.Line($"var reader = new DeltaReader(delta); reader.RequireRoot<{rootType}>();");
+            w.Line("var operations = reader.AsSpan();");
+            w.Line(returnsRoot ? "if (operations.IsEmpty) return target;" : "if (operations.IsEmpty) return;");
+            w.Line("if (operations.Length != 1 || operations[0].Kind != DeltaKind.ReplaceObject || operations[0].MemberIndex != -1)");
+            w.Line("    throw new InvalidOperationException(\"This model uses root replacement patches.\");");
+            w.Line($"{(returnsRoot ? "return" : "target =")} ({argumentType})operations[0].Value;");
+        });
+
+        var metadata = string.Join("|", root.ExternalRules?.OrderBy(pair => pair.Key.Name, StringComparer.Ordinal)
+            .Select(pair => pair.Key.Name + ":" + pair.Value) ?? Enumerable.Empty<string>());
+        var signature = Microsoft.CodeAnalysis.CSharp.SymbolDisplay.FormatLiteral(rootType + ":" + metadata, true);
+        w.Method($"{accessibility} static DeepSync<{rootType}> CreateDeepSync{parameters}(this {argumentType} model, " +
+                 $"System.Text.Json.Serialization.Metadata.JsonTypeInfo<{rootType}> snapshot, DeepSyncOptions? options = null){constraints}", () =>
+        {
+            var apply = returnsRoot
+                ? "static (value, patch) => ApplyDeepDelta(value, patch)"
+                : "static (value, patch) => { ApplyDeepDelta(ref value, patch); return value; }";
+            w.Line($"return new DeepSync<{rootType}>({signature}, snapshot, options,");
+            w.Line("static (before, after, rules) => AreDeepEqual(before, after, rules),");
+            w.Line("static (before, after, context) => ComputeDeepDelta(before, after, context),");
+            w.Line(apply + ", []);");
+        });
+    }
+
+    private static void EmitModel(CodeWriter w, EqualityTarget root, IEnumerable<INamedTypeSymbol> reachable,
+        bool trackCycles)
+    {
+        static string Literal(string value) => Microsoft.CodeAnalysis.CSharp.SymbolDisplay.FormatLiteral(value, true);
+        static string Display(ITypeSymbol type) => type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+        w.Open("internal static DeepModel Model => new(" + Literal(Display(root.Type)) + ", " +
+               (trackCycles ? "true" : "false") + ", new DeepModelMember[]", () =>
+        {
+            foreach (var type in reachable.OrderBy(Display, StringComparer.Ordinal))
+            {
+                var schema = GenCommon.GetTypeSchema(type);
+                var candidates = new EqualityTypeSchema([], []);
+                foreach (var member in GenCommon.OrderMembers(GenCommon.EnumerateMembers(
+                             type, root.IncludeInternals, root.IncludeBaseMembers, candidates)))
+                {
+                    var rule = root.GetMemberRule(member.Symbol);
+                    var kind = GenCommon.GetEffectiveKind(member.Type, rule);
+                    var mode = kind.ToString();
+                    if (kind == EffectiveKind.Skip || schema.IgnoreMembers.Contains(member.Name, StringComparer.Ordinal) ||
+                        schema.IncludeMembers.Count != 0 && !schema.IncludeMembers.Contains(member.Name, StringComparer.Ordinal))
+                        mode = "Skipped";
+                    else if (GenCommon.GetEffectiveComparerType(member.Type, rule) is not null)
+                        mode = "Custom";
+
+                    var collection = "None";
+                    var keys = "";
+                    ITypeSymbol? element = null;
+                    if (mode == "Deep" && !IsTerminalComparison(member.Type, rule, kind))
+                    {
+                        if (GenCommon.TryGetDictionaryInterface(member.Type, out _, out element))
+                            collection = "Dictionary";
+                        else if (member.Type is IArrayTypeSymbol array)
+                            element = array.ElementType;
+                        else if (!GenCommon.TryGetReadOnlyMemory(member.Type, out element) &&
+                                 !GenCommon.TryGetMemory(member.Type, out element))
+                            GenCommon.TryGetEnumerableInterface(member.Type, out element);
+
+                        if (element is not null && collection == "None")
+                        {
+                            var unordered = member.Type is not IArrayTypeSymbol { Rank: > 1 } &&
+                                            GenCommon.ResolveOrderInsensitive(root.OrderInsensitiveCollections, rule, element, type);
+                            collection = unordered ? "Unordered" : "Ordered";
+                            if (GenCommon.TryGetKeySpec(element, rule, root, out _, out _))
+                            {
+                                if (unordered) collection = "Keyed";
+                                keys = string.Join(", ", GenCommon.GetConfiguredKeyNames(element, rule));
+                            }
+                        }
+                    }
+
+                    var runtimeType = element ?? member.Type;
+                    var fallback = mode == "Deep" && (runtimeType.TypeKind is TypeKind.Interface or TypeKind.TypeParameter ||
+                                                      runtimeType.SpecialType == SpecialType.System_Object);
+                    w.Line("new DeepModelMember(" + Literal(Display(type)) + ", " + Literal(member.Name) + ", " +
+                           Literal(Display(member.Type)) + ", DeepMemberMode." + mode + ", DeepCollectionMode." +
+                           collection + ", " + Literal(keys) + ", " + (fallback ? "true" : "false") + "),");
+                }
+            }
+        });
+        w.Line(");");
+    }
+
     private void EmitHelperForType(CodeWriter w, INamedTypeSymbol type, EqualityTarget root, bool trackCycles,
-        HashSet<string> emittedComparers, List<string[]> comparerDeclarations, SourceProductionContext spc)
+        HashSet<string> emittedComparers, List<string[]> comparerDeclarations, SourceProductionContext spc, bool patchComparers)
     {
         var fqn = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
         var helper = GenCommon.GetHelperMethodName(type);
@@ -228,15 +372,18 @@ internal sealed class EqualityEmitter
                                  w.Line("var actual = right." + memberName + ";");
                                  if (IsTerminalComparison(member.Type, rule, kind))
                                  {
+                                     var next = "__next_" + GenCommon.SanitizeIdentifier(member.Name);
                                      EmitMember(w, type, member, root, emittedComparers, comparerDeclarations, spc,
-                                         "return context.RecordMemberMismatch(" + literalName + ", expected, actual);");
+                                         "if (!context.RecordMemberMismatch(" + literalName +
+                                         ", expected, actual)) return false; else goto " + next + ";");
+                                     w.Line(next + ": ;");
                                      return;
                                  }
 
                                  w.If("context.IsRecordingMismatch", () =>
                                  {
                                      w.Line("using var path = context.AtMember(" + literalName + ");");
-                                     w.Line("if (!CompareMember()) return context.RecordMismatch(expected, actual);");
+                                     w.Line("if (!CompareMember() && !context.RecordMismatch(expected, actual)) return false;");
                                  }).ElseIf("!CompareMember()", () => w.Line("return false;"));
                                  w.Method("bool CompareMember()", () =>
                                  {
@@ -249,6 +396,21 @@ internal sealed class EqualityEmitter
                  });
 
         w.Line();
+        if (!patchComparers) return;
+        foreach (var member in members)
+        {
+            var rule = root.GetMemberRule(member.Symbol);
+            var kind = GenCommon.GetEffectiveKind(member.Type, rule);
+            if (kind == EffectiveKind.Skip || !GenCommon.NeedsExactPatchComparison(member.Type, rule, type,
+                    root.OrderInsensitiveCollections, root.IncludeInternals, root.IncludeBaseMembers)) continue;
+            w.Method($"internal static bool {PatchCompareName(type, member.Name)}({fqn} left, {fqn} right, ComparisonContext context)", () =>
+            {
+                w.Line("var expected = left.@" + member.Name + ";");
+                w.Line("var actual = right.@" + member.Name + ";");
+                EmitMember(w, type, member, root, emittedComparers, comparerDeclarations, spc);
+                w.Line("return true;");
+            });
+        }
     }
 
     private static bool IsTerminalComparison(ITypeSymbol type, AttributeData? rule, EffectiveKind kind)
@@ -528,9 +690,9 @@ internal sealed class EqualityEmitter
             else
             {
                 var helper = arr.Rank == 1 ? "AreEqualArrayRank1" : "AreEqualArray";
-                w.If("!ComparisonHelpers." + helper + "<" + elFqn + ", " + cmpName + ">(" +
-                     leftExpr + ", " + rightExpr + ", new " + cmpName + "(" + (elemCustomVar ?? "") + "), context)",
-                     () => w.Line(failure));
+                var compare = "ComparisonHelpers." + helper + "<" + elFqn + ", " + cmpName + ">(" +
+                              leftExpr + ", " + rightExpr + ", new " + cmpName + "(" + (elemCustomVar ?? "") + "), context)";
+                EmitOrdered(w, el, arr.Rank == 1, deepAttr, root, cmpName, elemCustomVar, leftExpr, rightExpr, compare, failure, spc);
             }
 
             w.Line();
@@ -596,9 +758,9 @@ internal sealed class EqualityEmitter
             }
             else
             {
-                w.If("!ComparisonHelpers.AreEqualSequencesOrdered<" + elFqn + ", " + cmpName + ">(" +
-                     leftExpr + ", " + rightExpr + ", new " + cmpName + "(" + (elemCustomVar ?? "") + "), context)",
-                     () => w.Line(failure));
+                var compare = "ComparisonHelpers.AreEqualSequencesOrdered<" + elFqn + ", " + cmpName + ">(" +
+                              leftExpr + ", " + rightExpr + ", new " + cmpName + "(" + (elemCustomVar ?? "") + "), context)";
+                EmitOrdered(w, elT, true, deepAttr, root, cmpName, elemCustomVar, leftExpr, rightExpr, compare, failure, spc);
             }
 
             w.Line();
@@ -669,9 +831,8 @@ internal sealed class EqualityEmitter
             if (rule.Key == "KeyMembers" && rule.Value.Values.Length > 0 &&
                 ((member.Type is not IArrayTypeSymbol { Rank: 1 } &&
                   !GenCommon.TryGetEnumerableInterface(member.Type, out _)) ||
-                 GenCommon.TryGetDictionaryInterface(member.Type, out _, out _) ||
-                 attribute.NamedArguments.Any(arg => arg.Key == "OrderInsensitive" && arg.Value.Value is false)))
-                return Report($"KeyMembers on '{member.Name}' requires an unordered list or one-dimensional array.");
+                 GenCommon.TryGetDictionaryInterface(member.Type, out _, out _)))
+                return Report($"KeyMembers on '{member.Name}' requires a list or one-dimensional array.");
 
             if (rule is { Key: "ComparerType", Value.Value: INamedTypeSymbol custom })
             {
@@ -700,6 +861,26 @@ internal sealed class EqualityEmitter
             spc.ReportDiagnostic(Diagnostic.Create(Diagnostics.EQ004, location, message));
             return false;
         }
+    }
+
+    private static void EmitOrdered(CodeWriter w, ITypeSymbol element, bool canKey, AttributeData? attribute,
+        EqualityTarget root, string comparer, string? customComparer, string left, string right, string compare,
+        string failure, SourceProductionContext spc)
+    {
+        if (canKey && GenCommon.TryGetKeySpec(element, attribute, root, out var keyType, out var expression))
+        {
+            var elementName = element.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+            var describe = "ComparisonHelpers.DescribeOrderedByKey<" + elementName + ", " + keyType + ", " + comparer +
+                           ">(" + left + ", " + right + ", static item => " + string.Format(expression, "item") +
+                           ", new " + comparer + "(" + (customComparer ?? "") + "), context)";
+            w.If("!(" + left + " is not null && " + right + " is not null && context.IsCollectingChanges ? " +
+                 describe + " : " + compare + ")", () => w.Line(failure));
+            return;
+        }
+        if (attribute?.NamedArguments.Any(pair => pair.Key == "KeyMembers" && pair.Value.Values.Length > 0) == true)
+            spc.ReportDiagnostic(Diagnostic.Create(Diagnostics.EQ003,
+                attribute.ApplicationSyntaxReference?.GetSyntax(spc.CancellationToken).GetLocation(), element));
+        w.If("!" + compare, () => w.Line(failure));
     }
 
     private static void EmitUnordered(CodeWriter w, ITypeSymbol elementType, AttributeData? attribute,

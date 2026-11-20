@@ -37,4 +37,7 @@ public sealed class ComparisonOptions
     ///     to suppress no-op writes. Default is <c>false</c> (fastest).
     /// </summary>
     public bool ValidateDirtyOnEmit { get; init; }
+
+    /// <summary>Allows patch generation to consume dirty markers instead of comparing whole snapshots.</summary>
+    public bool UseDirtyTracking { get; init; } = true;
 }

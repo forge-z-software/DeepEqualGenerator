@@ -149,7 +149,7 @@ public sealed class DeepOpsGenerator : IIncrementalGenerator
             foreach (var (rootType, path, attr) in extMembers)
             {
                 var location = attr.ApplicationSyntaxReference?.GetSyntax(spc.CancellationToken).GetLocation();
-                if (!roots.TryGetValue(rootType, out var config) || config.genDelta || config.genDiff ||
+                if (!roots.TryGetValue(rootType, out var config) ||
                     path.IndexOfAny(['.', '<', '>']) >= 0)
                 {
                     spc.ReportDiagnostic(Diagnostic.Create(Diagnostics.EX004, location, path));
@@ -190,6 +190,7 @@ public sealed class DeepOpsGenerator : IIncrementalGenerator
                 }
 
                 externalRules.TryGetValue(type, out var rules);
+                var replacementOperations = GenCommon.EnumerateAllTypeParameters(type).Any() || rules is { Count: > 0 };
                 {
                     var hint = GenCommon.SanitizeFileName(
                         type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) + "_DeepEqual.g.cs");
@@ -197,17 +198,12 @@ public sealed class DeepOpsGenerator : IIncrementalGenerator
                         eqEmitter.EmitForRoot(
                             spc,
                             new EqualityTarget(type, incInt, ordIns, eqCycle, incBase, rules),
-                            hint);
+                            hint, replacementOperations && genDiff, replacementOperations && genDelta,
+                            !replacementOperations && (genDiff || genDelta));
                 }
 
-                if (genDiff || genDelta)
+                if ((genDiff || genDelta) && !replacementOperations)
                 {
-                    if (GenCommon.EnumerateAllTypeParameters(type).Any())
-                    {
-                        spc.ReportDiagnostic(Diagnostic.Create(Diagnostics.EQ005, loc, "diffs or deltas for an open generic root", type));
-                        continue;
-                    }
-
                     if (genDelta && stableMode == StableMemberIndexMode.Off && loc is not null)
                         spc.ReportDiagnostic(Diagnostic.Create(Diagnostics.DL001, loc));
 

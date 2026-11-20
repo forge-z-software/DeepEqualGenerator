@@ -715,17 +715,17 @@ namespace DeepEqual.RewrittenTests
             Assert.Contains(Changes(d), x => x.Kind == MemberChangeKind.Set && x.ValueOrDiff is byte[]);
         }
 
-        // 4) Order-insensitive suppression applies only to value-like sets (reference-like reorders still diff)
         [Fact]
-        public void Lines_PureReorder_On_ReferenceLike_Elements_Still_Diffs()
+        public void Lines_PureReorder_UsesTheSameKeyedRulesAsEquality()
         {
             var a = NewOrder(); var b = Clone(a);
             // reorder reference-like elements (OrderLine)
             b.Lines!.Reverse();
 
             var (has, d) = Diff(a, b);
-            Assert.True(has); // we don't suppress reorders for reference-like elements
-            Assert.Contains(Changes(d), x => x.Kind == MemberChangeKind.CollectionOps);
+            Assert.True(a.AreDeepEqual(b));
+            Assert.False(has);
+            Assert.True(d.IsEmpty);
         }
 
         // 5) Dict with null values: add key=null and change null->value both emit DictSet
@@ -934,17 +934,15 @@ namespace DeepEqual.RewrittenTests
             Assert.Contains(Changes(d), x => x.Kind == MemberChangeKind.Set && x.ValueOrDiff is string s && s == "A ");
         }
 
-        // Order-insensitive suppression applies only to value-like sets (reference-like reorders still diff)
         [Fact]
-        public void ReferenceLike_Reorder_List_Diffs_ValueLike_Set_Reorder_NoDiff()
+        public void KeyedListAndSetReorderingProduceNoDiff()
         {
             var a = NewOrder(); var b = Clone(a);
 
-            // Reference-like: OrderLine list reorder -> diff
             b.Lines!.Reverse();
             var (has1, d1) = Diff(a, b);
-            Assert.True(has1);
-            Assert.Contains(Changes(d1), mc => mc.Kind == MemberChangeKind.CollectionOps);
+            Assert.False(has1);
+            Assert.True(d1.IsEmpty);
 
             // Value-like: set reorder (Flags) -> no diff
             a = NewOrder(); b = Clone(a);

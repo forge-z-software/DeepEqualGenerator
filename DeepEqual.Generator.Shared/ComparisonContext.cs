@@ -16,14 +16,30 @@ public sealed class ComparisonContext
     private readonly bool _tracking;
     private List<RefPair>? _activePairs;
     private HashSet<RefPair>? _visited;
-    private List<PathSegment>? _path;
-    private int _suppressionDepth;
+    private DiagnosticState? _diagnostics;
 
-    public DeepMismatch? Mismatch { get; private set; }
-    public bool IsRecordingMismatch => _path is not null && _suppressionDepth == 0 && Mismatch is null;
+    public DeepMismatch? Mismatch => _diagnostics?.Mismatch;
+    public bool IsRecordingMismatch => _diagnostics is { SuppressionDepth: 0, Mismatch: null, Truncated: false };
+    public bool IsCollectingChanges => _diagnostics is { Changes: not null, SuppressionDepth: 0 };
 
     public static ComparisonContext ForMismatch(ComparisonOptions? options, bool trackCycles = true) =>
-        new(trackCycles, options) { _path = [] };
+        new(trackCycles, options) { _diagnostics = new(0) };
+
+    public static ComparisonContext ForReport(ComparisonOptions? options, int maxChanges, bool trackCycles = true)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxChanges);
+        return new(trackCycles, options) { _diagnostics = new(maxChanges) };
+    }
+
+    public DeepChangeReport GetReport() => new(_diagnostics?.Changes?.ToArray() ?? [],
+        _diagnostics?.Fallbacks?.ToArray() ?? [], _diagnostics?.Truncated ?? false);
+
+    internal void RecordRuntimeFallback(Type type)
+    {
+        if (_diagnostics is not { Changes: not null, SuppressionDepth: 0 } state ||
+            (state.Fallbacks?.Count ?? 0) >= state.MaxChanges) return;
+        (state.Fallbacks ??= []).Add(new DeepComparisonFallback(FormatPath(), type.FullName ?? type.Name));
+    }
 
     public PathScope AtMember(string name) =>
         IsRecordingMismatch ? PushPath(new PathSegment(PathKind.Member, name)) : default;
@@ -39,21 +55,37 @@ public sealed class ComparisonContext
 
     internal PathScope SuppressMismatch()
     {
-        if (_path is null) return default;
-        _suppressionDepth++;
+        if (_diagnostics is null) return default;
+        _diagnostics.SuppressionDepth++;
         return new PathScope(this, suppress: true);
     }
 
     public bool RecordMismatch<T>(T expected, T actual, DeepMismatchKind kind = DeepMismatchKind.Value)
     {
-        if (IsRecordingMismatch)
+        if (_diagnostics is { SuppressionDepth: 0, Mismatch: null, Truncated: false } state)
         {
-            var path = new StringBuilder("$");
-            foreach (var segment in _path!)
-                segment.AppendTo(path);
-            Mismatch = new DeepMismatch(path.ToString(), expected, actual, kind);
+            if (state.Changes is null)
+            {
+                state.Mismatch = new DeepMismatch(FormatPath(), expected, actual, kind);
+            }
+            else if (state.Changes.Count < state.MaxChanges)
+            {
+                state.Changes.Add(new DeepMismatch(FormatPath(), expected, actual, kind));
+                return true;
+            }
+            else
+            {
+                state.Truncated = true;
+            }
         }
         return false;
+    }
+
+    private string FormatPath()
+    {
+        var path = new StringBuilder("$");
+        foreach (var segment in _diagnostics!.Path) segment.AppendTo(path);
+        return path.ToString();
     }
 
     public bool RecordMemberMismatch<T>(string member, T expected, T actual)
@@ -65,8 +97,19 @@ public sealed class ComparisonContext
 
     private PathScope PushPath(PathSegment segment)
     {
-        _path!.Add(segment);
+        _diagnostics!.Path.Add(segment);
         return new PathScope(this, suppress: false);
+    }
+
+    private sealed class DiagnosticState(int maxChanges)
+    {
+        internal readonly List<PathSegment> Path = [];
+        internal readonly List<DeepMismatch>? Changes = maxChanges == 0 ? null : [];
+        internal readonly int MaxChanges = maxChanges;
+        internal List<DeepComparisonFallback>? Fallbacks;
+        internal DeepMismatch? Mismatch;
+        internal int SuppressionDepth;
+        internal bool Truncated;
     }
 
     private enum PathKind
@@ -119,9 +162,12 @@ public sealed class ComparisonContext
         {
             if (_context is null) return;
             if (_suppress)
-                _context._suppressionDepth--;
+                _context._diagnostics!.SuppressionDepth--;
             else
-                _context._path!.RemoveAt(_context._path.Count - 1);
+            {
+                var path = _context._diagnostics!.Path;
+                path.RemoveAt(path.Count - 1);
+            }
         }
     }
 

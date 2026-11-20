@@ -27,3 +27,16 @@ jobs:
       - run: dotnet run --project samples/OrderComparison/OrderComparison.csproj -c Release --no-restore
       - run: dotnet restore samples/DeltaRoundTrip/DeltaRoundTrip.csproj --source artifacts/packages --packages artifacts/smoke-cache
       - run: dotnet run --project samples/DeltaRoundTrip/DeltaRoundTrip.csproj -c Release --no-restore
+      - name: Verify packaged sync under Native AOT
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $feed = [System.Security.SecurityElement]::Escape((Resolve-Path artifacts/packages).Path)
+          $config = Join-Path (Get-Location) 'artifacts/aot-nuget.config'
+          ('<configuration><packageSources><clear/><add key="local" value="' + $feed + '"/><add key="nuget" value="https://api.nuget.org/v3/index.json" protocolVersion="3"/></packageSources></configuration>') | Set-Content $config
+          dotnet restore samples/DeltaRoundTrip/DeltaRoundTrip.csproj --configfile $config --packages artifacts/aot-cache -r win-x64 -p:PublishAot=true -warnaserror:NU1901,NU1902,NU1903,NU1904
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet publish samples/DeltaRoundTrip/DeltaRoundTrip.csproj -c Release -r win-x64 --no-restore -p:PublishAot=true -p:TrimmerSingleWarn=false -p:TreatWarningsAsErrors=true -p:IlcTreatWarningsAsErrors=true -o artifacts/native
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./artifacts/native/DeltaRoundTrip.exe
+          exit $LASTEXITCODE

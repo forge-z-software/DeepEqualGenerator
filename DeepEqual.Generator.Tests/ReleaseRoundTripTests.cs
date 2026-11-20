@@ -108,7 +108,7 @@ public sealed class ReleaseRoundTripTests
         var dictionaryDiff = Assert.IsType<DeltaDocument>(Assert.Single(diff.MemberChanges!).ValueOrDiff);
         var (hasEqualDiff, _) = original.GetDeepDiff(new MutableStock
         {
-            Locations = new(StringComparer.OrdinalIgnoreCase) { ["old"] = 1, ["match"] = 2, ["other"] = 3 }
+            Locations = new(StringComparer.OrdinalIgnoreCase) { ["Old"] = 1, ["Match"] = 2, ["Other"] = 3 }
         });
         Assert.False(hasEqualDiff);
         AssertOperations(dictionaryDiff);
@@ -120,11 +120,13 @@ public sealed class ReleaseRoundTripTests
         Assert.Equal(2, applied.Locations.Count);
         Assert.Equal(5, applied.Locations["match"]);
         Assert.Equal(4, applied.Locations["New"]);
+        Assert.Null(desired.GetDeepMismatch(applied));
 
         static void AssertOperations(DeltaDocument document)
         {
             Assert.Collection(document.Operations,
                 op => Assert.Equal((DeltaKind.DictRemove, "Old"), (op.Kind, Assert.IsType<string>(op.Key))),
+                op => Assert.Equal((DeltaKind.DictRemove, "Match"), (op.Kind, Assert.IsType<string>(op.Key))),
                 op => Assert.Equal((DeltaKind.DictRemove, "Other"), (op.Kind, Assert.IsType<string>(op.Key))),
                 op => Assert.Equal((DeltaKind.DictSet, "match", 5), (op.Kind, Assert.IsType<string>(op.Key), Assert.IsType<int>(op.Value))),
                 op => Assert.Equal((DeltaKind.DictSet, "New", 4), (op.Kind, Assert.IsType<string>(op.Key), Assert.IsType<int>(op.Value))));

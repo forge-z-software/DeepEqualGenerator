@@ -78,6 +78,9 @@ public static class DynamicDeepComparer
             finally { context.Exit(left, right); }
         }
 
+        if (context.IsCollectingChanges && !typeLeft.IsPrimitive && !typeLeft.IsEnum &&
+            left is not (Guid or DateOnly or TimeOnly or TimeSpan))
+            context.RecordRuntimeFallback(typeLeft);
         return left.Equals(right);
     }
 

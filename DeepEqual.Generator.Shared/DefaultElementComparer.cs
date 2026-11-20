@@ -1,5 +1,6 @@
 ﻿using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System;
 
 namespace DeepEqual.Generator.Shared;
 
@@ -18,6 +19,10 @@ public readonly struct DefaultElementComparer<T> : IElementComparer<T>
         if (left is float fa && right is float fb) return ComparisonHelpers.AreEqualSingle(fa, fb, context);
 
         if (left is decimal ma && right is decimal mb) return ComparisonHelpers.AreEqualDecimal(ma, mb, context);
+
+        if (left is DateTime timeA && right is DateTime timeB) return ComparisonHelpers.AreEqualDateTime(timeA, timeB);
+        if (left is DateTimeOffset offsetA && right is DateTimeOffset offsetB)
+            return ComparisonHelpers.AreEqualDateTimeOffset(offsetA, offsetB);
 
         return EqualityComparer<T>.Default.Equals(left, right);
     }

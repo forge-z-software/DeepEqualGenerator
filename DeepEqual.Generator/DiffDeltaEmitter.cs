@@ -84,6 +84,7 @@ internal sealed class DiffDeltaEmitter
                 {
                     EmitImplementationsForType(w, t, root);
                 }
+                if (root.GenerateDelta) EmitSyncApis(w, root, reachable);
             });
         });
 
@@ -97,6 +98,77 @@ internal sealed class DiffDeltaEmitter
 
         if (HasDeltaTrack(root.Type))
             EmitDeltaTrackPart(spc, root.Type, root);
+    }
+
+    private void EmitSyncApis(CodeWriter w, DiffDeltaTarget root, IEnumerable<INamedTypeSymbol> reachable)
+    {
+        static string Display(ITypeSymbol type) => type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+        static string Literal(string text) => Microsoft.CodeAnalysis.CSharp.SymbolDisplay.FormatLiteral(text, true);
+        static string TypeOf(ITypeSymbol? type) => type is null ? "null" : "typeof(" + Display(type) + ")";
+        static string Flag(bool value) => value ? "true" : "false";
+        static string Rules(ISymbol symbol) => string.Join("|", symbol.GetAttributes()
+            .Where(attribute => attribute.AttributeClass?.ToDisplayString().StartsWith(
+                "DeepEqual.Generator.Shared.Deep", StringComparison.Ordinal) == true)
+            .Select(attribute => attribute.ToString()).OrderBy(value => value, StringComparer.Ordinal));
+
+        var rootName = Display(root.Type);
+        var types = reachable.OrderBy(Display, StringComparer.Ordinal).ToArray();
+        var membersByType = types.Select(type => OrderMembers(EnumerateMembers(type, root.IncludeInternals,
+            root.IncludeBaseMembers, GetTypeSchema(type))).ToArray()).ToArray();
+        var signature = new StringBuilder(rootName);
+        signature.Append('|').Append(root.CycleTrackingEnabled).Append('|').Append(root.IncludeBaseMembers)
+            .Append('|').Append(root.IncludeInternals).Append('|').Append(root.OrderInsensitiveCollections);
+        for (var i = 0; i < types.Length; i++)
+        {
+            signature.Append('\n').Append(Display(types[i])).Append('|').Append(Rules(types[i]));
+            foreach (var member in membersByType[i])
+                signature.Append('\n').Append(GetStableMemberIndex(types[i], member).ToString(CultureInfo.InvariantCulture)).Append(':').Append(member.Name)
+                    .Append(':').Append(Display(member.Type)).Append(':').Append(CanAssign(member.Symbol, root.IncludeInternals))
+                    .Append(':').Append(Rules(member.Symbol));
+        }
+
+        var visibility = GenCommon.IsPublicType(root.Type) ? "public" : "internal";
+        w.Method($"{visibility} static DeepSync<{rootName}> CreateDeepSync(this {rootName}{(root.Type.IsValueType ? "" : "?")} model, " +
+                 $"System.Text.Json.Serialization.Metadata.JsonTypeInfo<{rootName}> snapshot, DeepSyncOptions? options = null)", () =>
+        {
+            var apply = root.Type.IsValueType
+                ? "static (value, delta) => { ApplyDeepDelta(ref value, delta); return value; }"
+                : "static (value, delta) => ApplyDeepDelta(value, delta)";
+            w.Line($"return new DeepSync<{rootName}>({Literal(signature.ToString())}, snapshot, options,");
+            w.Line("static (before, after, rules) => AreDeepEqual(before, after, rules),");
+            w.Line("static (before, after, context) => ComputeDeepDelta(before, after, context),");
+            w.Line(apply + ",");
+            w.Open("new DeepPatchSchema[]", () =>
+            {
+                for (var i = 0; i < types.Length; i++)
+                {
+                    var type = types[i];
+                    var name = Display(type);
+                    w.Line($"new DeepPatchSchema(typeof({name}), new DeepPatchMember[]");
+                    w.Open("", () =>
+                    {
+                        foreach (var member in membersByType[i])
+                        {
+                            var (kind, _, _, shallow, skip) = ResolveEffectiveSettings(member);
+                            if (kind == CompareKind.Skip || skip) continue;
+                            ITypeSymbol? key = null;
+                            ITypeSymbol? value = null;
+                            ITypeSymbol? element = null;
+                            if (!TryGetDictionaryTypes(member.Type, out key, out value) && member.Type is not IArrayTypeSymbol)
+                                TryGetListInterface(member.Type, out element);
+                            var id = GetStableMemberIndex(type, member);
+                            var canNest = key is null && element is null && !IsValueLike(member.Type) &&
+                                kind == CompareKind.Deep && !shallow;
+                            w.Line($"new DeepPatchMember({id}, {Literal(member.Name)}, {TypeOf(member.Type)}, " +
+                                   $"static target => (({name})target).@{member.Name}, {Flag(CanAssign(member.Symbol, root.IncludeInternals))}, " +
+                                   $"{TypeOf(element)}, {TypeOf(key)}, {TypeOf(value)}, {Flag(canNest)}),");
+                        }
+                    });
+                    w.Line("),");
+                }
+            });
+            w.Line(");");
+        });
     }
 
     private static void EmitRootApis(
@@ -963,11 +1035,29 @@ internal sealed class DiffDeltaEmitter
 
                     var ordered = OrderMembers(EnumerateMembers(type, root.IncludeInternals, root.IncludeBaseMembers, schema)).ToArray();
 
+                    foreach (var member in ordered)
+                    {
+                        var (kind, _, _, _, skip) = ResolveEffectiveSettings(member);
+                        if (kind == CompareKind.Skip || skip || GenCommon.GetEffectiveKind(member.Type,
+                                GenCommon.GetDeepCompareAttribute(member.Symbol)) == EffectiveKind.Skip ||
+                            CanAssign(member.Symbol, root.IncludeInternals) ||
+                            !TryGetDictionaryTypes(member.Type, out var key, out var value))
+                            continue;
+
+                        var keyName = key.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                        var valueName = value.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                        w.If($"!DeltaHelpers.CanApplyDictionaryInPlace<{keyName}, {valueName}>(left.@{member.Name}, right.@{member.Name}, context)", () =>
+                        {
+                            w.Line("writer.WriteReplaceObject(right);");
+                            w.Line("return;");
+                        });
+                    }
+
                     if (deltaTracked && !type.IsValueType)
                     {
-                        w.Line("var __validate = context.Options.ValidateDirtyOnEmit;");
+                        w.Line("var __validate = context.Options.UseDirtyTracking && context.Options.ValidateDirtyOnEmit;");
                         w.Line("var __r = right;");
-                        w.Line("var __hasDirty = __r is not null && __r.__HasAnyDirty();");
+                        w.Line("var __hasDirty = context.Options.UseDirtyTracking && __r is not null && __r.__HasAnyDirty();");
 
                         // validated: drain
                         w.If("__hasDirty && __validate", () =>
@@ -1431,7 +1521,7 @@ internal sealed class DiffDeltaEmitter
 
                                                 if (hasSetterForMember)
                                                 {
-                                            w.Line($"{propAccess} = ({$"global::System.Collections.Generic.Dictionary<{kFqn}, {vFqn}>"}{nullableQ})op.Value;");
+                                                        w.Line($"{propAccess} = ({typeFqn}{nullableQ})op.Value;");
                                                 }
                                                 else
                                                 {
@@ -1599,6 +1689,17 @@ internal sealed class DiffDeltaEmitter
         var (effKind, orderInsensitive, _, deltaShallow, deltaSkip) = ResolveEffectiveSettings(member);
         if (effKind == CompareKind.Skip || deltaSkip) return;
 
+        var rule = GenCommon.GetDeepCompareAttribute(member.Symbol);
+        if (GenCommon.GetEffectiveKind(member.Type, rule) == EffectiveKind.Skip) return;
+        if (GenCommon.NeedsExactPatchComparison(member.Type, rule, owner, root.OrderInsensitiveCollections,
+                root.IncludeInternals, root.IncludeBaseMembers))
+        {
+            var compare = EqualityEmitter.RootComparer(root.Type) + "." + EqualityEmitter.PatchCompareName(owner, member.Name);
+            w.If($"!{compare}(left, right, context)", () =>
+                w.Line($"(changes ??= new()).Add(new MemberChange({idx}, MemberChangeKind.Set, {right}));"));
+            return;
+        }
+
         // Arrays: replace-on-change (keep DIFF simple for arrays)
         if (member.Type is IArrayTypeSymbol arr)
         {
@@ -1720,33 +1821,6 @@ internal sealed class DiffDeltaEmitter
                 })
                 .Else(() =>
                 {
-                    // Optional order-insensitive suppression for value-like elements
-                    if (orderInsensitive && IsValueLike(elemType))
-                    {
-                        var mapVar = "__ms_" + idx;
-                        w.Line($"var __ena_{idx} = {la} as System.Collections.Generic.IEnumerable<{elFqn}>;");
-                        w.Line($"var __enb_{idx} = {lb} as System.Collections.Generic.IEnumerable<{elFqn}>;");
-                        w.If($"__ena_{idx} is not null && __enb_{idx} is not null", () =>
-                        {
-                            w.Line($"var {mapVar} = new System.Collections.Generic.Dictionary<{elFqn}, int>();");
-                            w.Foreach($"var __v", $"__ena_{idx}", () =>
-                            {
-                            w.Line($"{mapVar}.TryGetValue(__v, out var c); {mapVar}[__v] = c + 1;");
-                            });
-                            w.Line($"bool __eqms_{idx} = true;");
-                            w.Foreach($"var __v", $"__enb_{idx}", () =>
-                            {
-                            w.Line($"if (!{mapVar}.TryGetValue(__v, out var c) || c == 0) {{ __eqms_{idx} = false; goto __end_multiset_{idx}; }} {mapVar}[__v] = c - 1;");
-                            });
-                            w.Line($"__end_multiset_{idx}: ;");
-                            w.If($"__eqms_{idx}", () =>
-                            {
-                                // multisets equal -> no change
-                            w.Line($"goto __end_seq_{idx};");
-                            });
-                        });
-                    }
-
                     // Materialize to IList<T>
                     w.Line($"var __ena = {la} as System.Collections.Generic.IEnumerable<{elFqn}>;");
                     w.Line($"var __enb = {lb} as System.Collections.Generic.IEnumerable<{elFqn}>;");
@@ -1761,7 +1835,14 @@ internal sealed class DiffDeltaEmitter
                     {
                         w.Line("var __doc = new DeepEqual.Generator.Shared.DeltaDocument();");
                         w.Line("var __w = new DeepEqual.Generator.Shared.DeltaWriter(__doc);");
-                        if (IsValueLike(elemType))
+                        if (GenCommon.ResolveOrderInsensitive(root.OrderInsensitiveCollections, rule, elemType, owner) &&
+                            GenCommon.TryGetKeySpec(elemType, rule, new EqualityTarget(root.Type, root.IncludeInternals,
+                                root.OrderInsensitiveCollections, root.CycleTrackingEnabled, root.IncludeBaseMembers),
+                                out var keyType, out var keyExpression))
+                        {
+                            w.Line($"DeltaHelpers.ComputeKeyedListDeltaNested<{elFqn}, {keyType}>(__la, __lb, 0, ref __w, static entry => {string.Format(keyExpression, "entry")}, context);");
+                        }
+                        else if (IsValueLike(elemType))
                         {
                             var cmpType = $"DeepEqual.Generator.Shared.DefaultElementComparer<{elFqn}>";
                             w.Line($"DeepEqual.Generator.Shared.DeltaHelpers.ComputeListDelta<{elFqn}, {cmpType}>(__la, __lb, 0, ref __w, new {cmpType}(), context);");
@@ -1776,8 +1857,6 @@ internal sealed class DiffDeltaEmitter
                         });
                     });
 
-                    if (orderInsensitive && IsValueLike(elemType))
-                        w.Line($"__end_seq_{idx}: ;");
                 });
             });
             return;
@@ -1837,6 +1916,17 @@ internal sealed class DiffDeltaEmitter
 
         var (effKind, orderInsensitive, keys, deltaShallow, deltaSkip) = ResolveEffectiveSettings(member);
         if (effKind == CompareKind.Skip || deltaSkip) return;
+
+        var rule = GenCommon.GetDeepCompareAttribute(member.Symbol);
+        if (GenCommon.GetEffectiveKind(member.Type, rule) == EffectiveKind.Skip) return;
+        if (GenCommon.NeedsExactPatchComparison(member.Type, rule, owner, root.OrderInsensitiveCollections,
+                root.IncludeInternals, root.IncludeBaseMembers))
+        {
+            if (!hasSetterForMember && !CanMutateGetOnly(member.Type)) return;
+            var compare = EqualityEmitter.RootComparer(root.Type) + "." + EqualityEmitter.PatchCompareName(owner, member.Name);
+            w.If($"!{compare}(left, right, context)", () => w.Line($"writer.WriteSetMember({idx}, {right});"));
+            return;
+        }
 
         // ---- Value-like
         if (IsValueLike(member.Type))
@@ -1972,6 +2062,11 @@ internal sealed class DiffDeltaEmitter
 
                     void EmitGeneralDictionaryDelta()
                     {
+                        w.If($"!DeltaHelpers.TryComputeDictionaryWithCustomKeys<{kFqn}, {vFqn}>({la}, {lb}, {idx}, ref writer, {allowNestedExpr}, context)", EmitDictionaryInterfaces);
+                    }
+
+                    void EmitDictionaryInterfaces()
+                    {
                         // IReadOnlyDictionary<K,V>
                         w.If($"{la} is System.Collections.Generic.IReadOnlyDictionary<{kFqn}, {vFqn}> __roa && {lb} is System.Collections.Generic.IReadOnlyDictionary<{kFqn}, {vFqn}> __rob", () =>
                         {
@@ -2030,7 +2125,8 @@ internal sealed class DiffDeltaEmitter
         if (TryGetEnumerableElement(member.Type, out var elemType) && TryGetListInterface(member.Type, out _))
         {
             var elFqn = elemType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-            if (GenCommon.TryGetKeySpec(elemType, GenCommon.GetDeepCompareAttribute(member.Symbol),
+            var unordered = GenCommon.ResolveOrderInsensitive(root.OrderInsensitiveCollections, rule, elemType, owner);
+            if (unordered && GenCommon.TryGetKeySpec(elemType, rule,
                 new EqualityTarget(root.Type, root.IncludeInternals, root.OrderInsensitiveCollections,
                     root.CycleTrackingEnabled, root.IncludeBaseMembers), out var keyType, out var key))
             {
@@ -2038,7 +2134,7 @@ internal sealed class DiffDeltaEmitter
                 return;
             }
 
-            if (orderInsensitive || keys.Length > 0)
+            if (unordered)
             {
                 // Unordered/keyed: if equal ? no op; else replace (safe)
                 w.If($"!DeepEqual.Generator.Shared.ComparisonHelpers.DeepComparePolymorphic({left}, {right}, context)", () =>

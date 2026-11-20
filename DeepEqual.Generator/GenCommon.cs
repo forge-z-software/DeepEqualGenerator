@@ -252,7 +252,7 @@ internal static class GenCommon
                 yield return tp;
         }
 
-        foreach (var tp in type.TypeParameters)
+        foreach (var tp in type.TypeArguments.OfType<ITypeParameterSymbol>())
             yield return tp;
     }
 
@@ -538,29 +538,7 @@ internal static class GenCommon
         var keys = new List<EqualityMemberSymbol>();
         keyTypeFqn = "";
         keyExprFormat = "{0}";
-        var names = Array.Empty<string>();
-
-        if (memberAttribute is not null)
-            foreach (var kv in memberAttribute.NamedArguments)
-                if (kv is { Key: "KeyMembers", Value.Values: { Length: > 0 } arr })
-                {
-                    names = arr.Select(v => v.Value?.ToString() ?? "").Where(s => s.Length > 0).ToArray();
-                    break;
-                }
-
-        if (names.Length == 0)
-        {
-            var typeAttr = elementType.OriginalDefinition.GetAttributes()
-                .FirstOrDefault(a => a.AttributeClass?.ToDisplayString() == DeepCompareAttributeMetadataName);
-            if (typeAttr is not null)
-                foreach (var kv in typeAttr.NamedArguments)
-                    if (kv is { Key: "KeyMembers", Value.Values: { Length: > 0 } arr2 })
-                    {
-                        names = arr2.Select(v => v.Value?.ToString() ?? "").Where(s => s.Length > 0).ToArray();
-                        break;
-                    }
-        }
-
+        var names = GetConfiguredKeyNames(elementType, memberAttribute);
         if (names.Length == 0) return false;
 
         foreach (var n in names)
@@ -585,6 +563,34 @@ internal static class GenCommon
             keys.Select(k => k.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))) + ">";
         keyExprFormat = "(" + string.Join(",", keys.Select(k => "{0}.@" + k.Name)) + ")";
         return true;
+    }
+
+    internal static string[] GetConfiguredKeyNames(ITypeSymbol elementType, AttributeData? memberAttribute)
+    {
+        var names = Array.Empty<string>();
+
+        if (memberAttribute is not null)
+            foreach (var kv in memberAttribute.NamedArguments)
+                if (kv is { Key: "KeyMembers", Value.Values: { Length: > 0 } arr })
+                {
+                    names = arr.Select(v => v.Value?.ToString() ?? "").Where(s => s.Length > 0).ToArray();
+                    break;
+                }
+
+        if (names.Length == 0)
+        {
+            var typeAttr = elementType.OriginalDefinition.GetAttributes()
+                .FirstOrDefault(a => a.AttributeClass?.ToDisplayString() == DeepCompareAttributeMetadataName);
+            if (typeAttr is not null)
+                foreach (var kv in typeAttr.NamedArguments)
+                    if (kv is { Key: "KeyMembers", Value.Values: { Length: > 0 } arr2 })
+                    {
+                        names = arr2.Select(v => v.Value?.ToString() ?? "").Where(s => s.Length > 0).ToArray();
+                        break;
+                    }
+        }
+
+        return names;
     }
 
     internal static EqualityMemberSymbol? FindMemberOn(ITypeSymbol type, string name, bool includeInternals, bool includeBase)
@@ -999,5 +1005,27 @@ internal static class GenCommon
         }
 
         return orderInsensitiveCollection;
+    }
+
+    internal static bool NeedsExactPatchComparison(ITypeSymbol value, AttributeData? rule, INamedTypeSymbol owner,
+        bool rootUnordered, bool includeInternals, bool includeBase)
+    {
+        if (GetEffectiveKind(value, rule) != EffectiveKind.Deep || GetEffectiveComparerType(value, rule) is not null)
+            return true;
+        if (TryGetDictionaryInterface(value, out _, out var dictionaryValue))
+            return GetEffectiveComparerType(dictionaryValue!, rule) is not null ||
+                   GetEffectiveKind(dictionaryValue!, null) != EffectiveKind.Deep;
+        if (TryGetReadOnlyMemory(value, out _) || TryGetMemory(value, out _)) return true;
+        if (value is IArrayTypeSymbol || IsWellKnownStruct(value)) return true;
+        if (value.SpecialType == SpecialType.System_String) return false;
+        if (TryGetEnumerableInterface(value, out var element))
+        {
+            if (GetEffectiveComparerType(element!, rule) is not null || GetEffectiveKind(element!, null) != EffectiveKind.Deep)
+                return true;
+            return ResolveOrderInsensitive(rootUnordered, rule, element!, owner) &&
+                   !TryGetKeySpec(element!, rule,
+                       new EqualityTarget(owner, includeInternals, rootUnordered, true, includeBase), out _, out _);
+        }
+        return value.IsValueType && value.SpecialType == SpecialType.None;
     }
 }

@@ -23,6 +23,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DeepOps.Validation", "DeepE
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DeepEqualGenerator.MockApp", "DeepEqualGenerator.MockApp\DeepEqualGenerator.MockApp.csproj", "{F89AF8ED-A2E5-4F01-94D2-B2F4FFD82CE5}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DeepEqual.Generator.CodeFixes", "DeepEqual.Generator.CodeFixes\DeepEqual.Generator.CodeFixes.csproj", "{50A66A22-B606-4BFE-8C47-EE909882144F}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -53,6 +55,10 @@ Global
 		{F89AF8ED-A2E5-4F01-94D2-B2F4FFD82CE5}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{F89AF8ED-A2E5-4F01-94D2-B2F4FFD82CE5}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{F89AF8ED-A2E5-4F01-94D2-B2F4FFD82CE5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{50A66A22-B606-4BFE-8C47-EE909882144F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{50A66A22-B606-4BFE-8C47-EE909882144F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{50A66A22-B606-4BFE-8C47-EE909882144F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{50A66A22-B606-4BFE-8C47-EE909882144F}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

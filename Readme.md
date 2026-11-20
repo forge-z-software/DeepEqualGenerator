@@ -1,89 +1,87 @@
 # DeepEqualGenerator
 
-Compare .NET models with generated code. Ask for a boolean in the hot path or get the first mismatch with its path and both values.
+Compare .NET model snapshots with generated code. See what changed by property, index, or business key. Create a patch and apply it with the same comparison rules.
 
 ## Quick start
 
-Version 2.0 bundles the generator, attributes, and runtime in one package. It targets .NET 8 or later and requires a C# 12 compiler with Roslyn 4.11 or later.
+DeepEqualGenerator targets .NET 8 or later and requires a C# 12 compiler with Roslyn 4.11 or later. One NuGet package contains the generator, attributes, runtime, and IDE fixes.
+
+```sh
+dotnet add package DeepEqual.Generator --version 2.1.0
+```
 
 ```csharp
 using DeepEqual;
 using DeepEqual.Generator.Shared;
 
-var expected = new Order { Lines = [new("SKU-8", 1), new("SKU-9", 2)] };
-var actual = new Order { Lines = [new("SKU-9", 3), new("SKU-8", 1)] };
+var before = new Inventory { Lines = [new("SKU-9", 2), new("SKU-11", 1)] };
+var after = new Inventory { Lines = [new("SKU-9", 3), new("SKU-12", 1)] };
 
-bool equal = expected.AreDeepEqual(actual);
-DeepMismatch? mismatch = expected.GetDeepMismatch(actual);
-if (mismatch is { } change)
-    Console.WriteLine($"{change.Path} changed from {change.Expected} to {change.Actual}");
+Console.WriteLine(before.DescribeDeepChanges(after).ToText());
+var patched = before.ApplyDeepDelta(before.ComputeDeepDelta(after));
+after.AssertDeepEqual(patched);
 
-[DeepComparable]
-public sealed class Order
+[DeepComparable(GenerateDelta = true)]
+public sealed class Inventory
 {
     [DeepCompare(KeyMembers = [nameof(Line.Sku)])]
-    public List<Line> Lines { get; init; } = [];
+    public List<Line> Lines { get; set; } = [];
 }
 
-public sealed record Line(string Sku, int Qty);
+public sealed record Line(string Sku, int Quantity);
 ```
 
 ```text
-$.Lines["SKU-9"].Qty changed from 2 to 3
+$.Lines["SKU-9"].Quantity 2 → 3
+$.Lines["SKU-11"] removed <Line>
+$.Lines["SKU-12"] added <Line>
 ```
 
-`GetDeepMismatch` runs the same generated comparison as `AreDeepEqual` and returns `null` for equal inputs. It reports the first failure in traversal order. Paths start at `$` and include property names, zero-based sequence indices, and dictionary or matching keys where available. A count or shape mismatch is reported at the collection. If unordered elements have no unique matching key, the mismatch can be reported at the collection or key bucket.
+| When you need | Use |
+| --- | --- |
+| A fast yes or no | `AreDeepEqual` |
+| The first reason two objects differ | `GetDeepMismatch` |
+| A bounded change report with named paths | `DescribeDeepChanges` |
+| A test assertion with that same report | `AssertDeepEqual` |
+| The generated rules for a model | `ExplainDeepModel` |
+| A structural diff for code that consumes operation IDs | `GetDeepDiff` with `GenerateDiff = true` |
+| An in-memory patch | `ComputeDeepDelta` and `ApplyDeepDelta` with `GenerateDelta = true` |
+| A checked, revisioned patch between processes | `CreateDeepSync` with `GenerateDelta = true` and JSON serializer metadata |
+
+[Run the inventory walkthrough](samples/DeltaRoundTrip) · [Read the comparison recipes](docs/Recipes.md) · [Troubleshoot a compiler diagnostic](docs/Diagnostics.md)
 
 ## Comparison rules
 
-- Readable public instance properties and fields are included by default, including inherited members. Use `[DeepComparable(IncludeBaseMembers = false)]` to exclude inherited members or `IncludeInternals = true` to include eligible internal members. Getters run during comparison, so compare stable snapshots when values can mutate.
-- Cycle tracking is enabled by default and treats repeated pairs on the current path as equal. Shared reference topology is ignored. Set `CycleTracking = false` only for acyclic graphs.
-- Lists and one-dimensional arrays are ordered by default. `OrderInsensitive = true` matches elements one-to-one and counts duplicates. `KeyMembers` enables unordered matching within key buckets. Prefer unique keys for precise mismatch paths and larger collections.
-- Dictionary keys and matching keys use .NET default key equality regardless of the input dictionaries' comparers. `ComparisonOptions.StringComparison` governs the compared string values. Date and time values compare `DateTime.Kind` or `DateTimeOffset.Offset` as well as the time value.
-- `ComparisonOptions` supports absolute numeric tolerances and NaN handling. A tolerance can relate values non-transitively and is intended for comparisons, assertions, or validation.
-- `[DeepCompare(Kind = CompareKind.Skip)]` skips a member. `Shallow` uses its regular equality and `Reference` requires the same instance. Use `ComparerType` for an `IEqualityComparer<T>` with an accessible parameterless constructor. Apply `Members` or `IgnoreMembers` to the type that declares those members.
-- For values stored as `object` or an interface, generated helpers are used when the runtime type has been registered. Known runtime containers are compared by content. Other runtime values fall back to their regular equality. Use the typed extensions for generic comparison roots.
+- Public readable instance properties and fields are included by default. Use `IncludeBaseMembers = false` to exclude inherited members or `IncludeInternals = true` for eligible internal members. Getters run during comparison. Use stable snapshots when values can mutate concurrently.
+- Cycles are tracked by active reference pairs. Shared reference topology is ignored. Set `CycleTracking = false` for acyclic models.
+- Ordered collections are compared by position. `OrderInsensitive = true` matches duplicates one-to-one. `KeyMembers` matches by key and ignores order by default. Set `OrderInsensitive = false` alongside keys to compare order and report position changes. Reports compare an unordered bucket as a group when items cannot be paired unambiguously.
+- Dictionary and matching keys use default .NET key equality. String options apply to compared values. A dictionary patch can use a replacement when the receiver’s comparer cannot represent the desired keys. Date values compare `DateTime.Kind` or `DateTimeOffset.Offset` as well as the time value.
+- `ComparisonOptions` controls numeric tolerances, NaN, and string comparison. Named `ComparisonProfile` instances share options between assertions, validation, and sync. A numeric tolerance may be non-transitive.
+- `[DeepCompare(Kind = CompareKind.Skip)]` excludes a member. `Shallow` uses ordinary equality and `Reference` uses reference identity. `ComparerType` accepts an `IEqualityComparer<T>` with an accessible parameterless constructor. Apply `Members` or `IgnoreMembers` to the declaring type.
+- Generated helpers handle known runtime model types in interface and object members. Known runtime containers compare by content. Reports list where ordinary equality was used for an unregistered type.
+- Use `[assembly: ExternalDeepComparable(typeof(ExternalModel))]` for types you cannot annotate. `ExternalDeepCompare` applies rules to direct members. Roots with external overrides use replacement diffs and deltas.
 
-Compare an external model by adding `[assembly: ExternalDeepComparable(typeof(ExternalModel))]`. `[assembly: ExternalDeepCompare(typeof(ExternalModel), nameof(ExternalModel.Timestamp), Kind = CompareKind.Skip)]` applies a rule to a direct member.
+## Patching and deployment
 
-## Diffs and deltas
+| Feature | Supported workflow |
+| --- | --- |
+| Comparison, reports, assertions | Generated class and struct roots, including generic roots, on the regular runtime and Native AOT |
+| In-memory diffs and deltas | Granular operations for supported writable members and mutable collections. Immutable and open generic roots use replacement when needed. |
+| BDC1 binary codec | Primitive values, strings, known time and ID types, enums, byte arrays, and supported containers. Explicit `JsonTypeInfo` registrations extend value support. |
+| Checked sync | Generated schemas, revision checks, isolated preview and apply, packet inspection, and full-snapshot recovery. Source-generated serializer metadata supports Native AOT. Register typed container and enum values for AOT. |
 
-Set `GenerateDiff = true` to enable `GetDeepDiff`. Set `GenerateDelta = true` to enable `ComputeDeepDelta` and `ApplyDeepDelta`. The generated patch can update writable members and supported mutable collections in place. It uses a replacement for immutable state and for list changes where positional operations would be ambiguous. Capture the returned object when applying a patch to a class.
+Raw `ApplyDeepDelta` can mutate the target. Capture its return value for classes because a patch can replace the entire object. Apply raw deltas to the same model and baseline used to compute them. Use [checked sync](docs/Sync.md) to validate a packet and stage the result independently.
 
-```csharp
-var delta = original.ComputeDeepDelta(desired);
-var result = original.ApplyDeepDelta(delta);
-bool reproduced = desired.AreDeepEqual(result);
-```
-
-Apply a delta to the same baseline and model schema used to compute it. In-memory replacements can retain references to the desired values. The in-memory API checks the root type of generated delta documents before applying them.
-
-Use `BinaryDeltaCodec` to transport supported delta values between matching schemas. Set `IncludeHeader = true` and give both endpoints the same nonzero `StableTypeFingerprint`. Change that identifier when you change the schema or comparison rules. The codec supports primitives, strings, GUIDs, date and time values, enums, byte arrays, and supported one-dimensional arrays, lists, and dictionaries. Arbitrary model instances and cycles require an application-level representation. Dictionary containers decode with the default key comparer. Enum identity requires the matching enum assembly. [Binary delta round-trip example](samples/DeltaRoundTrip/Program.cs)
-
-Generated diff and delta extensions require a nongeneric root. Equality and mismatch explanations also support generic roots and Native AOT. The binary codec uses runtime type construction for typed collections, so its supported deployment target is the regular .NET runtime.
-
-## Dirty bits and access tracking
-
-Add `[DeltaTrack]` to a partial model with delta generation enabled and call the generated `__MarkDirty(__Bit_PropertyName)` from the property setter. The delta generator can then use the marks to find changed members. Set `ComparisonOptions.ValidateDirtyOnEmit` to check a flagged value against the baseline before emitting an operation.
-
-Set `AccessTrack = AccessMode.Write` on `DeltaTrack` to collect write diagnostics. Choose bits, counts, or counts with the last write time through `AccessGranularity`. The generated `__DumpAccessJson()` method exposes the tracking data.
+To record dirty members, add `[DeltaTrack]` to a partial model with delta generation enabled and call the generated `__MarkDirty(__Bit_PropertyName)` from the setter. `ValidateDirtyOnEmit` checks flagged members before emitting an operation. Checked sync compares whole snapshots and leaves dirty markers alone. `AccessTrack = AccessMode.Write` records write diagnostics and `__DumpAccessJson()` exposes them.
 
 ## Build and verify
 
-Use a serviced .NET 8.0.4xx SDK. Build, test, pack, and run both examples against the local feed.
-
 ```sh
 dotnet build DeepEqual.Generator.sln -c Release
-dotnet test DeepEqual.Generator.Tests/DeepEqual.Generator.Tests.csproj -c Release --no-build
-dotnet pack DeepEqual.Generator.Shared/DeepEqual.Generator.Shared.csproj -c Release --no-build -o artifacts/packages
-dotnet restore samples/OrderComparison/OrderComparison.csproj --source artifacts/packages --packages artifacts/smoke-cache
-dotnet run --project samples/OrderComparison/OrderComparison.csproj -c Release --no-restore
-dotnet restore samples/DeltaRoundTrip/DeltaRoundTrip.csproj --source artifacts/packages --packages artifacts/smoke-cache
-dotnet run --project samples/DeltaRoundTrip/DeltaRoundTrip.csproj -c Release --no-restore
+dotnet test DeepEqual.Generator.Tests -c Release --no-build
+dotnet pack DeepEqual.Generator.Shared -c Release --no-build -o artifacts/packages
+dotnet restore samples/DeltaRoundTrip --source artifacts/packages --packages artifacts/smoke-cache
+dotnet run --project samples/DeltaRoundTrip -c Release --no-restore
 ```
 
-Install 2.0.1 from that local feed with `dotnet add package DeepEqual.Generator --version 2.0.1 --source <feed-path>`. For a 1.x project, remove its separate `DeepEqual.Generator.Shared` package reference and call `expected.AreDeepEqual(actual)` with `using DeepEqual;`.
-
-Run the [comparison benchmarks](DeepEqual.Generator.Benchmarking/DeepEqualityBenchmarks.cs) with `dotnet run -c Release --project DeepEqual.Generator.Benchmarking -- --filter '*DeepEqualityBenchmarks*'`. The fixture checks both comparers and the mismatch path before timing equal models and a late mismatch.
-
-Run the [feature benchmarks](DeepEqual.Generator.Benchmarking/FeaturePerformanceBenchmarks.cs) with `dotnet run -c Release --project DeepEqual.Generator.Benchmarking -- --filter '*FeaturePerformanceBenchmarks*'`. They cover arrays, dictionaries, unordered and keyed collections, polymorphism, cycles, mismatch paths, structured diffs, delta computation and application, the binary codec, and tracking. The benchmarks time changed and unchanged models, patch application on its own and with a fresh target, and binary encoding with and without tables.
+The [benchmark guide](docs/Benchmarks.md) covers comparisons, reports, patches, and full snapshots. For a local package, add `--source <feed-path>` to the installation command. For a 1.x project, remove the separate `DeepEqual.Generator.Shared` package reference and call `expected.AreDeepEqual(actual)` with `using DeepEqual;`.

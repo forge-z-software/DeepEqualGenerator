@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 
 namespace DeepEqual.Generator.Shared;
 
@@ -76,7 +77,8 @@ public static class BinaryDeltaCodec
         ByteArray = 22,
         Array = 23,
         List = 24,
-        Dictionary = 25
+        Dictionary = 25,
+        RegisteredValue = 26
     }
 
     private enum TypeSpecKind : byte
@@ -331,6 +333,19 @@ public static class BinaryDeltaCodec
             }
 
             var t = value.GetType();
+
+            if (_opt.ValueTypes?.Find(t) is { } registered)
+            {
+                if (_nesting >= _opt.Safety.MaxNesting) throw new InvalidOperationException("Max nesting exceeded.");
+                var bytes = JsonSerializer.SerializeToUtf8Bytes(value, registered.Serialization);
+                if (bytes.Length > _opt.Safety.MaxStringBytes)
+                    throw new InvalidOperationException("Registered value exceeds the byte limit.");
+                sw.WriteByte((byte)VTag.RegisteredValue);
+                sw.WriteVarUInt(registered.Id);
+                sw.WriteVarUInt((uint)bytes.Length);
+                sw.WriteBytes(bytes);
+                return;
+            }
 
             if (t.IsEnum)
             {
@@ -669,6 +684,7 @@ public static class BinaryDeltaCodec
             var useTypeTable = _opt.IncludeHeader && _opt.UseTypeTable;
             HashSet<Type>? enumTypes = null;
             var useStringTable = _opt.IncludeHeader && _opt.UseStringTable;
+            var registeredTypes = _opt.ValueTypes;
             Dictionary<string, StringEntry>? counts = null;
 
             void RequireDepth(int depth)
@@ -707,12 +723,19 @@ public static class BinaryDeltaCodec
 
             void VisitValue(object? v, int nesting)
             {
+                if (v is string s)
+                {
+                    CountString(s);
+                    return;
+                }
+                if (v is not null && registeredTypes?.Find(v.GetType()) is not null)
+                {
+                    RequireDepth(nesting);
+                    return;
+                }
                 switch (v)
                 {
                     case null:
-                        return;
-                    case string s:
-                        CountString(s);
                         return;
                     case int or uint or long or ulong or bool or byte or sbyte or short or ushort or
                          float or double or decimal or char or Guid or DateTime or TimeSpan or DateTimeOffset:
@@ -963,6 +986,15 @@ public static class BinaryDeltaCodec
                 case VTag.List:
                 case VTag.Dictionary:
                     return ReadCollection(ref sr, tag);
+                case VTag.RegisteredValue:
+                {
+                    if (_nesting >= _opt.Safety.MaxNesting) throw new InvalidOperationException("Max nesting exceeded.");
+                    var id = sr.ReadVarUInt();
+                    if (id > uint.MaxValue || _opt.ValueTypes?.Find((uint)id) is not { } registered)
+                        throw new InvalidOperationException("Unregistered delta value type.");
+                    var length = (int)sr.ReadVarUIntChecked(_opt.Safety.MaxStringBytes);
+                    return JsonSerializer.Deserialize(sr.ReadSpan(length), registered.Serialization);
+                }
                 case VTag.Null: return null;
                 case VTag.BoolFalse: return false;
                 case VTag.BoolTrue: return true;
@@ -1101,6 +1133,9 @@ public static class BinaryDeltaCodec
                 return true;
             }
 
+            if (!RuntimeFeature.IsDynamicCodeSupported)
+                throw new NotSupportedException("Register this array type with explicit serializer metadata for Native AOT.");
+
             try
             {
                 arr = Array.CreateInstance(t, len);
@@ -1118,6 +1153,8 @@ public static class BinaryDeltaCodec
         private static object CreateList(Type t, int capacity)
         {
             if (t == typeof(object)) return new List<object?>(capacity);
+            if (!RuntimeFeature.IsDynamicCodeSupported)
+                throw new NotSupportedException("Register this list type with explicit serializer metadata for Native AOT.");
 
             try
             {
@@ -1131,6 +1168,9 @@ public static class BinaryDeltaCodec
 
         private static object CreateDictionary(Type kt, Type vt, int capacity)
         {
+            if (!RuntimeFeature.IsDynamicCodeSupported)
+                throw new NotSupportedException("Register this dictionary type with explicit serializer metadata for Native AOT.");
+
             try
             {
                 return Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(kt, vt), capacity)!;
@@ -1176,10 +1216,12 @@ public static class BinaryDeltaCodec
         }
 
         private static Type ResolveEnumType(string fullName, string assembly, Guid identity) =>
-            ResolveType(fullName, assembly, identity) is { IsEnum: true } type
+            RuntimeFeature.IsDynamicCodeSupported && ResolveType(fullName, assembly, identity) is { IsEnum: true } type
                 ? type
                 : throw new TypeLoadException($"Enum '{fullName}' was not found in '{assembly}' ({identity}).");
 
+        [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2026",
+            Justification = "Legacy enum identity lookup is limited to the dynamic runtime. Explicit type registrations preserve values on trimmed deployments.")]
         private static Type? ResolveType(string full, string asmSimple, Guid mvid)
         {
             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
@@ -1443,6 +1485,14 @@ public static class BinaryDeltaCodec
         private ReadOnlySpan<byte> _data = data;
 
         public ReadOnlySpan<byte> Remaining => _data;
+
+        public ReadOnlySpan<byte> ReadSpan(int length)
+        {
+            RequireBytes(length);
+            var result = _data[..length];
+            _data = _data[length..];
+            return result;
+        }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public byte ReadByte()

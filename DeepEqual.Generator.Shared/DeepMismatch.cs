@@ -11,5 +11,9 @@ public enum DeepMismatchKind
 {
     Value,
     Count,
-    MissingKey
+    MissingKey,
+    Added,
+    Removed,
+    Moved,
+    Set
 }

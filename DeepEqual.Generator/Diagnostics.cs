@@ -7,6 +7,7 @@ namespace DeepEqual.Generator;
 
 internal static class Diagnostics
 {
+    private const string RuleGuide = "https://github.com/Quaverflow/DeepEqualGenerator/blob/HEAD/docs/Diagnostics.md";
     private const string Category = "DeepEqual.Generator";
 
     internal static readonly DiagnosticDescriptor DL001 =
@@ -65,20 +66,21 @@ internal static class Diagnostics
 
     internal static readonly DiagnosticDescriptor EQ003 =
         new("EQ003", "Invalid collection key members",
-            "KeyMembers must name one to seven readable members of '{0}'", Category, DiagnosticSeverity.Error, true);
+            "KeyMembers must name one to seven readable members of '{0}'", Category, DiagnosticSeverity.Error, true,
+            helpLinkUri: RuleGuide + "#eq003");
 
     internal static readonly DiagnosticDescriptor EQ004 =
         new("EQ004", "Invalid comparison rule",
-            "{0}", Category, DiagnosticSeverity.Error, true);
+            "{0}", Category, DiagnosticSeverity.Error, true, helpLinkUri: RuleGuide + "#eq004");
 
     internal static readonly DiagnosticDescriptor EQ005 =
         new("EQ005", "Unsupported comparison root",
-            "Cannot generate {0} for '{1}'", Category, DiagnosticSeverity.Error, true);
+            "Cannot generate {0} for '{1}'", Category, DiagnosticSeverity.Error, true, helpLinkUri: RuleGuide + "#eq005");
 
     internal static readonly DiagnosticDescriptor EX004 =
         new("EX004", "Unsupported external override",
-            "External override '{0}' requires a registered root, a direct readable member and equality generation only",
-            Category, DiagnosticSeverity.Error, true);
+            "External override '{0}' requires a registered root and a direct readable member",
+            Category, DiagnosticSeverity.Error, true, helpLinkUri: RuleGuide + "#ex004");
 
     internal static readonly DiagnosticDescriptor DF001 =
         new(

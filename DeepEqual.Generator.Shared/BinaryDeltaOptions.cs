@@ -24,6 +24,9 @@ public sealed class BinaryDeltaOptions
     /// <summary>Enum values are encoded with underlying integral + type identity.</summary>
     public bool IncludeEnumTypeIdentity { get; set; } = true;
 
+    /// <summary>Opt-in value types with stable IDs and explicit JSON serializer metadata.</summary>
+    public BinaryDeltaTypeRegistry? ValueTypes { get; set; }
+
     /// <summary>Light safety caps to avoid pathological inputs.</summary>
     public Limits Safety { get; } = new();
 

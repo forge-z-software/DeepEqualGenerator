@@ -100,6 +100,9 @@ public static class ComparisonHelpers
 
         if (a is null || b is null) return false;
 
+        if (context.IsCollectingChanges)
+            return DescribeOrdered(a, b, comparer, context);
+
         if (a.Length != b.Length) return context.RecordMismatch(a.Length, b.Length, DeepMismatchKind.Count);
 
         for (var i = 0; i < a.Length; i++)
@@ -175,6 +178,9 @@ public static class ComparisonHelpers
         if (ReferenceEquals(a, b)) return true;
         if (a is null || b is null) return false;
 
+        if (context.IsCollectingChanges)
+            return DescribeOrdered(a, b, comparer, context);
+
         if (a is T[] aa && b is T[] bb)
             return AreEqualArrayRank1<T, TComparer>(aa, bb, comparer, context);
 
@@ -215,6 +221,68 @@ public static class ComparisonHelpers
             if (ma != mb) return false;
             if (!ma) return true;
             if (!CompareAtIndex(ea.Current, eb.Current, index, comparer, context)) return false;
+        }
+    }
+
+    private static bool DescribeOrdered<T, TComparer>(IEnumerable<T> before, IEnumerable<T> after,
+        TComparer comparer, ComparisonContext context) where TComparer : IElementComparer<T>
+    {
+        using var left = before.GetEnumerator();
+        using var right = after.GetEnumerator();
+        for (var index = 0; ; index++)
+        {
+            var hasBefore = left.MoveNext();
+            var hasAfter = right.MoveNext();
+            if (!hasBefore && !hasAfter) return true;
+            if (hasBefore && hasAfter)
+            {
+                if (!CompareAtIndex(left.Current, right.Current, index, comparer, context)) return false;
+                continue;
+            }
+
+            using var path = context.AtIndex(index);
+            if (!context.RecordMismatch(hasBefore ? (object?)left.Current : null,
+                    hasAfter ? (object?)right.Current : null,
+                    hasBefore ? DeepMismatchKind.Removed : DeepMismatchKind.Added)) return false;
+        }
+    }
+
+    public static bool DescribeOrderedByKey<T, TKey, TComparer>(IEnumerable<T> before, IEnumerable<T> after,
+        Func<T, TKey> getKey, TComparer comparer, ComparisonContext context)
+        where TComparer : IElementComparer<T>
+    {
+        var left = before as IReadOnlyList<T> ?? before.ToArray();
+        var right = after as IReadOnlyList<T> ?? after.ToArray();
+        var leftKeys = CreateIndex(left);
+        var rightKeys = CreateIndex(right);
+        if (leftKeys is null || rightKeys is null) return DescribeOrdered(left, right, comparer, context);
+
+        foreach (var (key, index) in leftKeys)
+        {
+            using var path = context.AtKey(key.Item1);
+            if (!rightKeys.TryGetValue(key, out var newIndex))
+            {
+                if (!context.RecordMismatch<object?>(left[index], null, DeepMismatchKind.Removed)) return false;
+                continue;
+            }
+            if (index != newIndex && !context.RecordMismatch(index, newIndex, DeepMismatchKind.Moved)) return false;
+            if (!comparer.Invoke(left[index], right[newIndex], context) &&
+                !context.RecordMismatch(left[index], right[newIndex])) return false;
+        }
+        foreach (var (key, index) in rightKeys)
+        {
+            if (leftKeys.ContainsKey(key)) continue;
+            using var path = context.AtKey(key.Item1);
+            if (!context.RecordMismatch<object?>(null, right[index], DeepMismatchKind.Added)) return false;
+        }
+        return true;
+
+        Dictionary<ValueTuple<TKey>, int>? CreateIndex(IReadOnlyList<T> values)
+        {
+            var keys = new Dictionary<ValueTuple<TKey>, int>(values.Count);
+            for (var i = 0; i < values.Count; i++)
+                if (values[i] is not { } item || !keys.TryAdd(ValueTuple.Create(getKey(item)), i)) return null;
+            return keys;
         }
     }
 
@@ -266,27 +334,42 @@ public static class ComparisonHelpers
             group.Actual.Add(item);
         }
 
-        if (expectedNulls != actualNulls || expectedKeyCount != actualKeyCount) return false;
+        var report = context.IsCollectingChanges;
+        if (expectedNulls != actualNulls)
+        {
+            if (!report || !context.RecordMismatch(expectedNulls, actualNulls, DeepMismatchKind.Count))
+                return false;
+        }
+        if (!report && expectedKeyCount != actualKeyCount) return false;
 
         foreach (var (key, group) in groups)
         {
-            if (group.Expected.Count == 0) continue;
+            if (!report && group.Expected.Count == 0) continue;
             using var path = context.AtKey(key.Item1);
 
             if (group.Expected.Count == 1 && group.Actual.Count == 1)
             {
-                if (!comparer.Invoke(group.Expected.First, group.Actual.First, context))
-                    return context.RecordMismatch(group.Expected.First, group.Actual.First);
+                if (!comparer.Invoke(group.Expected.First, group.Actual.First, context) &&
+                    !context.RecordMismatch(group.Expected.First, group.Actual.First)) return false;
             }
             else if (group.Expected.Count != group.Actual.Count)
             {
+                if (report)
+                {
+                    var kind = group.Expected.Count == 0 ? DeepMismatchKind.Added :
+                        group.Actual.Count == 0 ? DeepMismatchKind.Removed : DeepMismatchKind.Count;
+                    var before = group.Expected.Count > 1 ? (object?)group.Expected.Duplicates : group.Expected.First;
+                    var after = group.Actual.Count > 1 ? (object?)group.Actual.Duplicates : group.Actual.First;
+                    if (!context.RecordMismatch(before, after, kind)) return false;
+                    continue;
+                }
                 if (context.IsRecordingMismatch)
                     context.RecordMismatch(group.Expected.AsList(), group.Actual.Count == 0 ? null : group.Actual.AsList());
                 return false;
             }
             else if (!MatchUnordered(group.Expected.Duplicates!, group.Actual.Duplicates!, comparer, context))
             {
-                return context.RecordMismatch(group.Expected.Duplicates, group.Actual.Duplicates);
+                if (!context.RecordMismatch(group.Expected.Duplicates, group.Actual.Duplicates)) return false;
             }
         }
         return true;
@@ -457,27 +540,37 @@ public static class ComparisonHelpers
         var leftMap = NormalizeMap(left);
         var rightMap = NormalizeMap(right);
         if (leftMap is null || rightMap is null) return false;
-        if (leftMap.Count != rightMap.Count)
+        var report = context.IsCollectingChanges;
+        if (!report && leftMap.Count != rightMap.Count)
             return context.RecordMismatch(leftMap.Count, rightMap.Count, DeepMismatchKind.Count);
 
         foreach (var pair in leftMap)
         {
             using var path = context.AtKey(pair.Key);
             if (!rightMap.TryGetValue(pair.Key, out var actual))
-                return context.RecordMismatch<object?>(pair.Value, null, DeepMismatchKind.MissingKey);
-            if (!comparer.Invoke(pair.Value, actual, context))
-                return context.RecordMismatch(pair.Value, actual);
+            {
+                if (!context.RecordMismatch<object?>(pair.Value, null,
+                        report ? DeepMismatchKind.Removed : DeepMismatchKind.MissingKey)) return false;
+                continue;
+            }
+            if (!comparer.Invoke(pair.Value, actual, context) && !context.RecordMismatch(pair.Value, actual)) return false;
         }
+
+        if (report)
+            foreach (var pair in rightMap)
+            {
+                if (leftMap.ContainsKey(pair.Key)) continue;
+                using var path = context.AtKey(pair.Key);
+                if (!context.RecordMismatch<object?>(null, pair.Value, DeepMismatchKind.Added)) return false;
+            }
 
         return true;
     }
 
-    private static Dictionary<TKey, TValue>? NormalizeMap<TKey, TValue>(IEnumerable<KeyValuePair<TKey, TValue>> pairs)
+    internal static Dictionary<TKey, TValue>? NormalizeMap<TKey, TValue>(IEnumerable<KeyValuePair<TKey, TValue>> pairs)
         where TKey : notnull
     {
-        if (pairs is Dictionary<TKey, TValue> map &&
-            (ReferenceEquals(map.Comparer, EqualityComparer<TKey>.Default) ||
-             (typeof(TKey) == typeof(string) && ReferenceEquals(map.Comparer, StringComparer.Ordinal))))
+        if (pairs is Dictionary<TKey, TValue> map && UsesDefaultKeys(map))
             return map;
 
         var result = new Dictionary<TKey, TValue>();
@@ -485,6 +578,10 @@ public static class ComparisonHelpers
             if (!result.TryAdd(pair.Key, pair.Value)) return null;
         return result;
     }
+
+    internal static bool UsesDefaultKeys<TKey, TValue>(Dictionary<TKey, TValue> map) where TKey : notnull =>
+        ReferenceEquals(map.Comparer, EqualityComparer<TKey>.Default) ||
+        (typeof(TKey) == typeof(string) && ReferenceEquals(map.Comparer, StringComparer.Ordinal));
 
     public static bool DeepComparePolymorphic<T>(T left, T right, ComparisonContext context) =>
         DynamicDeepComparer.AreEqualDynamic(left, right, context);
