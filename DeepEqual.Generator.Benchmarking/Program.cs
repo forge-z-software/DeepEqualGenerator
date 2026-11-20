@@ -512,7 +512,7 @@ public sealed class DevConfig : ManualConfig
             .WithUnrollFactor(1)
             .WithMinIterationTime(TimeInterval.FromMilliseconds(50))
             .WithMaxRelativeError(0.05)
-            .WithToolchain(InProcessNoEmitToolchain.Instance)
+            .WithToolchain(InProcessNoEmitToolchain.Default)
             .WithId("DevInProc"));
     }
 }
