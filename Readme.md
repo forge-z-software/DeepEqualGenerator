@@ -7,7 +7,7 @@ Compare .NET model snapshots with generated code. See what changed by property, 
 DeepEqualGenerator targets .NET 8 or later and requires a C# 12 compiler with Roslyn 4.11 or later. One NuGet package contains the generator, attributes, runtime, and IDE fixes.
 
 ```sh
-dotnet add package DeepEqual.Generator --version 2.2.0
+dotnet add package DeepEqual.Generator --version 2.3.0
 ```
 
 ```csharp
@@ -43,12 +43,15 @@ $.Lines["SKU-12"] added <Line>
 | The first reason two objects differ | `GetDeepMismatch` |
 | A bounded change report with named paths | `DescribeDeepChanges` |
 | A test assertion with that same report | `AssertDeepEqual` |
+| A side-by-side HTML report or CI artifact | [`ToHtml`](docs/HtmlReport.md) |
 | The generated rules for a model | `ExplainDeepModel` |
 | A structural diff for code that consumes operation IDs | `GetDeepDiff` with `GenerateDiff = true` |
 | An in-memory patch | `ComputeDeepDelta` and `ApplyDeepDelta` with `GenerateDelta = true` |
 | A checked, revisioned patch between processes | `CreateDeepSync` with `GenerateDelta = true` and JSON serializer metadata |
 
 [Run the inventory walkthrough](samples/DeltaRoundTrip) · [Read the comparison recipes](docs/Recipes.md) · [Troubleshoot a compiler diagnostic](docs/Diagnostics.md)
+
+Save a failed assertion as a filterable HTML report with the same redaction as its test output. The [GitHub Actions example](docs/HtmlReport.md) shows how to upload the report on failure.
 
 ## Comparison rules
 

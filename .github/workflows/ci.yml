@@ -27,6 +27,10 @@ jobs:
       - run: dotnet run --project samples/OrderComparison/OrderComparison.csproj -c Release --no-restore
       - run: dotnet restore samples/DeltaRoundTrip/DeltaRoundTrip.csproj --source artifacts/packages --packages artifacts/smoke-cache
       - run: dotnet run --project samples/DeltaRoundTrip/DeltaRoundTrip.csproj -c Release --no-restore
+      - run: dotnet restore samples/HtmlReportCi --configfile samples/HtmlReportCi/LocalPackage.NuGet.Config --packages artifacts/html-cache -warnaserror:NU1901,NU1902,NU1903,NU1904
+      - name: Test the packaged HTML report example
+        shell: pwsh
+        run: ./samples/HtmlReportCi/Verify-Report.ps1
       - name: Verify packaged sync under Native AOT
         if: runner.os == 'Windows'
         shell: pwsh

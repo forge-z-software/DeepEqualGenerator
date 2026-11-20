@@ -1,0 +1,36 @@
+name: HTML diff report example
+
+on:
+  workflow_dispatch:
+    inputs:
+      demonstrate_failure:
+        description: Show a failed test with a redacted diff artifact
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+      - run: dotnet pack DeepEqual.Generator.Shared -c Release -o artifacts/packages
+      - run: dotnet restore samples/HtmlReportCi --configfile samples/HtmlReportCi/LocalPackage.NuGet.Config --packages artifacts/html-cache
+      - name: Run inventory tests
+        id: tests
+        env:
+          DEEPEQUAL_DEMO_MISMATCH: ${{ inputs.demonstrate_failure && '1' || '0' }}
+          DEEPEQUAL_REPORT_DIRECTORY: ${{ github.workspace }}/artifacts/deep-equal
+        run: dotnet test samples/HtmlReportCi -c Release --no-restore
+      - name: Upload the failed comparison
+        if: ${{ failure() && steps.tests.outcome == 'failure' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: deep-equal-report
+          path: artifacts/deep-equal/*.html
+          if-no-files-found: ignore
