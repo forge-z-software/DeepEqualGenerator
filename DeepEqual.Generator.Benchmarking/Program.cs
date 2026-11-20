@@ -1,474 +1,1100 @@
-﻿using System.Dynamic;
+﻿// Program.cs
+#nullable enable
 using BenchmarkDotNet.Attributes;
+using BenchmarkDotNet.Configs;
+using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Running;
+using BenchmarkDotNet.Toolchains.InProcess.NoEmit;
+using DeepEqual;
 using DeepEqual.Generator.Shared;
-using Newtonsoft.Json.Linq;
-using System.Text.Json;
-using System.Text.Json.Nodes;
-using KellermanSoftware.CompareNetObjects;
-using FluentAssertions;
+using Microsoft.AspNetCore.JsonPatch;
+using Microsoft.AspNetCore.JsonPatch.Operations;
+using Perfolizer.Horology;
+using System.Buffers;
+using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 
-namespace DeepEqual.Generator.Benchmarking
+namespace DeepEqual.Generator.Benchmarking;
+// ===============================================================
+// === YOUR EXISTING BENCHES GO HERE (UNCHANGED) =================
+// ===============================================================
+//
+// Paste the full content of your current benchmark classes/models
+// in this region. Do not paste your old Program/Main here.
+// Keep exactly as-is; nothing else in this file depends on it.
+//
+// ===============================================================
+
+
+// ===============================================================
+// === EXTRA BENCHMARK MODELS & FACTORY (appended) ===============
+// ===============================================================
+
+// ----- Ordered vs Unordered (with keys) -----
+
+[DeepComparable(IncludeBaseMembers = true, GenerateDiff = true, GenerateDelta = true, StableMemberIndex = StableMemberIndexMode.Auto)]
+public sealed class CustOrdered_Extra
 {
-    internal class Program
-    {
-        static void Main() => BenchmarkRunner.Run<MidGraphBenchmarks>();
-    }
+    public string Id { get; set; } = "";
+    public List<OrderOrdered_Extra> Orders { get; set; } = new();
+}
 
-    public enum Region { NA, EU, APAC }
+[DeepComparable(IncludeBaseMembers = true, GenerateDiff = true, GenerateDelta = true)]
+public sealed class OrderOrdered_Extra
+{
+    public string Number { get; set; } = "";
+    public List<ItemOrdered_Extra> Lines { get; set; } = new();
+}
 
-    [DeepComparable(CycleTracking = false)]
-    public sealed class Address
-    {
-        public string Line1 { get; set; } = "";
-        public string City { get; set; } = "";
-        public string Postcode { get; set; } = "";
-        public string Country { get; set; } = "";
-    }
+[DeepCompare] // default ordered
+public sealed class ItemOrdered_Extra
+{
+    public string Sku { get; set; } = "";
+    public int Qty { get; set; }
+    public decimal Price { get; set; }
+}
 
-    [DeepComparable(CycleTracking = false)]
-    public sealed class OrderLine
-    {
-        public string Sku { get; set; } = "";
-        public int Qty { get; set; }
-        public decimal LineTotal { get; set; }
-    }
+// Unordered variant that matches by key (Sku)
+[DeepComparable(IncludeBaseMembers = true, GenerateDiff = true, GenerateDelta = true)]
+public sealed class CustUnordered_Extra
+{
+    public string Id { get; set; } = "";
+    public List<OrderUnordered_Extra> Orders { get; set; } = new();
+}
 
-    [DeepComparable(CycleTracking = false)]
-    public sealed class Order
-    {
-        public Guid Id { get; set; }
-        public DateTimeOffset Created { get; set; }
-        public List<OrderLine> Lines { get; set; } = new();
-        public Dictionary<string, string> Meta { get; set; } = new(StringComparer.Ordinal);
-    }
+[DeepComparable(IncludeBaseMembers = true, GenerateDiff = true, GenerateDelta = true)]
+public sealed class OrderUnordered_Extra
+{
+    public string Number { get; set; } = "";
+    public List<ItemUnordered_Extra> Lines { get; set; } = new();
+}
 
-    [DeepComparable(CycleTracking = false)]
-    public sealed class Customer
-    {
-        public Guid Id { get; set; }
-        public string FullName { get; set; } = "";
-        public Region Region { get; set; }
-        public Address ShipTo { get; set; } = new();
-        public List<Order> Orders { get; set; } = new();
-    }
+[DeepCompare(OrderInsensitive = true, KeyMembers = new[] { "Sku" })]
+public sealed class ItemUnordered_Extra
+{
+    public string Sku { get; set; } = "";
+    public int Qty { get; set; }
+    public decimal Price { get; set; }
+}
 
-    [DeepComparable(CycleTracking = false)]
-    public sealed class MidGraph
-    {
-        public string Title { get; set; } = "";
-        public List<Customer> Customers { get; set; } = new();
-        public Dictionary<string, decimal> PriceIndex { get; set; } = new(StringComparer.Ordinal);
-        public object? Polymorph { get; set; }
-        public IDictionary<string, object?> Extra { get; set; } = new ExpandoObject();
-    }
+// ----- Arrays vs Lists -----
 
-    public static class MidGraphFactory
-    {
-        public static MidGraph Create(int customers = 40, int ordersPerCustomer = 3, int linesPerOrder = 4, int seed = 123)
+[DeepComparable(GenerateDiff = true, GenerateDelta = true)]
+public sealed class WithList_Extra
+{
+    public List<ValueLine_Extra> Lines { get; set; } = new();
+}
+
+[DeepComparable(GenerateDiff = true, GenerateDelta = true)]
+public sealed class WithArray_Extra
+{
+    public ValueLine_Extra[] Lines { get; set; } = Array.Empty<ValueLine_Extra>();
+}
+
+[DeepCompare]
+public sealed class ValueLine_Extra
+{
+    public int V { get; set; }
+}
+
+// ----- Polymorphic member -----
+
+public interface IPolymorph_Extra { int Tag { get; } }
+[DeepComparable(GenerateDiff = true, GenerateDelta = true)]
+[DeltaTrack]
+public partial class PolyA_Extra : IPolymorph_Extra { public int Tag => 1; public string A = "a"; }
+
+[DeepComparable(GenerateDiff = true, GenerateDelta = true)]
+[DeltaTrack]
+public partial class PolyB_Extra : IPolymorph_Extra { public int Tag => 2; public int B = 42; }
+
+[DeepComparable(GenerateDiff = true, GenerateDelta = true)]
+[DeltaTrack]
+public partial class PolyC_Extra : IPolymorph_Extra { public int Tag => 3; public Guid C = Guid.NewGuid(); }
+
+[DeepComparable(GenerateDiff = true, GenerateDelta = true)]
+public sealed class WithPolymorph_Extra
+{
+    public List<IPolymorph_Extra> Payload { get; set; } = new();
+}
+
+// ----- Big strings / extras -----
+
+[DeepComparable(GenerateDiff = true, GenerateDelta = true)]
+public sealed class WithBigStrings_Extra
+{
+    public List<BigStr_Extra> Lines { get; set; } = new();
+}
+
+[DeepCompare]
+public sealed class BigStr_Extra
+{
+    public string Key { get; set; } = "";
+    public string Extra { get; set; } = "";
+}
+
+// ----- DeltaTrack fast-path emission toggle -----
+
+[DeepComparable(GenerateDiff = true, GenerateDelta = true, StableMemberIndex = StableMemberIndexMode.Auto)]
+[DeltaTrack(ThreadSafe = false)]
+public partial class DirtyTracked_Extra
+{
+    public int A { get; set; }
+    public int B { get; set; }
+    public List<int> L { get; set; } = new();
+}
+
+public static class GenX_Extra
+{
+    public static CustOrdered_Extra MakeOrdered(int customers, int ordersPerCustomer, int linesPerOrder)
+        => new CustOrdered_Extra
         {
-            var rng = new Random(seed);
-
-            var g = new MidGraph
+            Id = "root",
+            Orders = Enumerable.Range(0, ordersPerCustomer).Select(c => new OrderOrdered_Extra
             {
-                Title = $"MidGraph-{seed}",
-                Polymorph = (seed % 2 == 0)
-                    ? (object)$"poly-{seed}"
-                    : (object)new Address { Line1 = "1 High St", City = "London", Postcode = "E1 1AA", Country = "UK" }
-            };
-
-            for (int i = 0; i < 50; i++)
-                g.PriceIndex[$"SKU-{i:D4}"] = 10 + (i % 7);
-
-            var ex = (IDictionary<string, object?>)g.Extra;
-            ex["build"] = seed;
-            ex["flags"] = new[] { "x", "y", "z" };
-            ex["meta"] = new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                ["channel"] = "web",
-                ["ab"] = new[] { "A", "B" }
-            };
-
-            for (int c = 0; c < customers; c++)
-            {
-                var cust = new Customer
+                Number = $"O{c}",
+                Lines = Enumerable.Range(0, linesPerOrder).Select(i => new ItemOrdered_Extra
                 {
-                    Id = GuidFrom($"C{seed}-{c}"),
-                    FullName = $"Customer {c}",
-                    Region = (Region)(c % 3),
-                    ShipTo = new Address
-                    {
-                        Line1 = $"{c} Road",
-                        City = (c % 2 == 0) ? "London" : "Paris",
-                        Postcode = $"PC{c:000}",
-                        Country = (c % 2 == 0) ? "UK" : "FR"
-                    }
-                };
+                    Sku = $"SKU{i}",
+                    Qty = 1 + (i % 3),
+                    Price = 10 + i
+                }).ToList()
+            }).ToList()
+        };
 
-                for (int o = 0; o < ordersPerCustomer; o++)
-                {
-                    var order = new Order
-                    {
-                        Id = GuidFrom($"C{c}-O{o}-{seed}"),
-                        Created = new DateTimeOffset(2025, 1, 1, 12, 0, 0, TimeSpan.Zero).AddMinutes(o)
-                    };
-
-                    for (int l = 0; l < linesPerOrder; l++)
-                    {
-                        var sku = $"SKU-{(c + o + l) % 50:D4}";
-                        var price = g.PriceIndex[sku];
-                        order.Lines.Add(new OrderLine
-                        {
-                            Sku = sku,
-                            Qty = 1 + (l % 3),
-                            LineTotal = price * (1 + (l % 3))
-                        });
-                    }
-
-                    order.Meta["channel"] = (o % 2 == 0) ? "web" : "app";
-                    order.Meta["bucket"] = ((c + o) % 5).ToString();
-                    cust.Orders.Add(order);
-                }
-
-                g.Customers.Add(cust);
-            }
-
-            return g;
-
-            static Guid GuidFrom(string s)
+    public static CustUnordered_Extra MakeUnordered(int ordersPerCustomer, int linesPerOrder, bool shuffleRight)
+    {
+        var root = new CustUnordered_Extra { Id = "root" };
+        for (int c = 0; c < ordersPerCustomer; c++)
+        {
+            var o = new OrderUnordered_Extra { Number = $"O{c}" };
+            o.Lines = Enumerable.Range(0, linesPerOrder).Select(i => new ItemUnordered_Extra
             {
-                var bytes = System.Text.Encoding.UTF8.GetBytes(s);
-                Span<byte> g = stackalloc byte[16];
-                for (int i = 0; i < 16; i++) g[i] = (byte)(bytes[i % bytes.Length] + i * 31);
-                return new Guid(g);
-            }
+                Sku = $"SKU{i}",
+                Qty = 1 + (i % 5),
+                Price = 10 + i
+            }).ToList();
+            root.Orders.Add(o);
         }
+        if (shuffleRight) foreach (var o in root.Orders) o.Lines.Reverse();
+        return root;
     }
 
-        public static class ManualNonLinq
+    public static WithList_Extra MakeList(int n) => new WithList_Extra
     {
-        public static bool AreEqual(MidGraph? a, MidGraph? b)
-        {
-            if (ReferenceEquals(a, b)) return true;
-            if (a is null || b is null) return false;
-            if (!string.Equals(a.Title, b.Title, StringComparison.Ordinal)) return false;
+        Lines = Enumerable.Range(0, n).Select(i => new ValueLine_Extra { V = i }).ToList()
+    };
 
-            if (!DictEqual(a.PriceIndex, b.PriceIndex)) return false;
-
-            if (!ObjectEqual(a.Polymorph, b.Polymorph)) return false;
-            if (!DynamicEqual(a.Extra, b.Extra)) return false;
-
-            if (a.Customers.Count != b.Customers.Count) return false;
-            for (int i = 0; i < a.Customers.Count; i++)
-                if (!CustomerEqual(a.Customers[i], b.Customers[i])) return false;
-
-            return true;
-        }
-        private static bool CustomerEqual(Customer? a, Customer? b)
-        {
-            if (ReferenceEquals(a, b)) return true;
-            if (a is null || b is null) return false;
-            if (!string.Equals(a.FullName, b.FullName, StringComparison.Ordinal)) return false;
-            if (a.Region != b.Region) return false;
-            if (!AddressEqual(a.ShipTo, b.ShipTo)) return false;
-
-            if (a.Orders.Count != b.Orders.Count) return false;
-            for (int i = 0; i < a.Orders.Count; i++)
-                if (!OrderEqual(a.Orders[i], b.Orders[i])) return false;
-            return true;
-        }
-        private static bool OrderEqual(Order? a, Order? b)
-        {
-            if (ReferenceEquals(a, b)) return true;
-            if (a is null || b is null) return false;
-            if (a.Id != b.Id) return false;
-            if (a.Created != b.Created) return false;
-
-            if (!DictEqual(a.Meta, b.Meta)) return false;
-
-            if (a.Lines.Count != b.Lines.Count) return false;
-            for (int i = 0; i < a.Lines.Count; i++)
-                if (!LineEqual(a.Lines[i], b.Lines[i])) return false;
-            return true;
-        }
-        private static bool LineEqual(OrderLine? a, OrderLine? b)
-        {
-            if (ReferenceEquals(a, b)) return true;
-            if (a is null || b is null) return false;
-            return a.Sku == b.Sku && a.Qty == b.Qty && a.LineTotal == b.LineTotal;
-        }
-        private static bool AddressEqual(Address? a, Address? b)
-        {
-            if (ReferenceEquals(a, b)) return true;
-            if (a is null || b is null) return false;
-            return a.Line1 == b.Line1 && a.City == b.City && a.Postcode == b.Postcode && a.Country == b.Country;
-        }
-        private static bool DictEqual<TKey, TValue>(Dictionary<TKey, TValue>? a, Dictionary<TKey, TValue>? b)
-            where TKey : notnull
-        {
-            if (ReferenceEquals(a, b)) return true;
-            if (a is null || b is null) return false;
-            if (a.Count != b.Count) return false;
-            foreach (var kv in a)
-            {
-                if (!b.TryGetValue(kv.Key, out var bv)) return false;
-                if (!Equals(kv.Value, bv)) return false;
-            }
-            return true;
-        }
-        private static bool ObjectEqual(object? a, object? b)
-        {
-            if (ReferenceEquals(a, b)) return true;
-            if (a is null || b is null) return false;
-            if (a.GetType() != b.GetType()) return false;
-            if (a is string sa) return string.Equals(sa, (string)b, StringComparison.Ordinal);
-            if (a is Address aa) return AddressEqual(aa, (Address)b);
-            return a.Equals(b);
-        }
-        private static bool DynamicEqual(IDictionary<string, object?> a, IDictionary<string, object?> b)
-        {
-            if (a.Count != b.Count) return false;
-            foreach (var kv in a)
-            {
-                if (!b.TryGetValue(kv.Key, out var bv)) return false;
-                if (!ObjectEqual(kv.Value, bv)) return false;
-            }
-            return true;
-        }
-    }
-
-        public static class ManualLinqy
+    public static WithArray_Extra MakeArray(int n) => new WithArray_Extra
     {
-        public static bool AreEqual(MidGraph? a, MidGraph? b)
-        {
-            if (ReferenceEquals(a, b)) return true;
-            if (a is null || b is null) return false;
+        Lines = Enumerable.Range(0, n).Select(i => new ValueLine_Extra { V = i }).ToArray()
+    };
 
-            return a.Title == b.Title
-                && DictEqual(a.PriceIndex, b.PriceIndex)
-                && ObjectEqual(a.Polymorph, b.Polymorph)
-                && DynamicEqual(a.Extra, b.Extra)
-                && a.Customers.SequenceEqual(b.Customers, new CustomerEq());
-        }
-
-        private sealed class CustomerEq : IEqualityComparer<Customer>
-        {
-            public bool Equals(Customer? x, Customer? y)
-            {
-                if (ReferenceEquals(x, y)) return true;
-                if (x is null || y is null) return false;
-                return x.FullName == y.FullName
-                    && x.Region == y.Region
-                    && AddressEqual(x.ShipTo, y.ShipTo)
-                    && x.Orders.SequenceEqual(y.Orders, new OrderEq());
-            }
-            public int GetHashCode(Customer obj) => 0;
-        }
-
-        private sealed class OrderEq : IEqualityComparer<Order>
-        {
-            public bool Equals(Order? x, Order? y)
-            {
-                if (ReferenceEquals(x, y)) return true;
-                if (x is null || y is null) return false;
-                return x.Id == y.Id
-                    && x.Created.Equals(y.Created)
-                    && DictEqual(x.Meta, y.Meta)
-                    && x.Lines.SequenceEqual(y.Lines, new LineEq());
-            }
-            public int GetHashCode(Order obj) => 0;
-        }
-
-        private sealed class LineEq : IEqualityComparer<OrderLine>
-        {
-            public bool Equals(OrderLine? x, OrderLine? y)
-                => x!.Sku == y!.Sku && x.Qty == y.Qty && x.LineTotal == y.LineTotal;
-            public int GetHashCode(OrderLine obj) => 0;
-        }
-
-        private static bool AddressEqual(Address? a, Address? b)
-        {
-            if (ReferenceEquals(a, b)) return true;
-            if (a is null || b is null) return false;
-            return a.Line1 == b.Line1 && a.City == b.City && a.Postcode == b.Postcode && a.Country == b.Country;
-        }
-        private static bool DictEqual<TKey, TValue>(Dictionary<TKey, TValue> a, Dictionary<TKey, TValue> b)
-            where TKey : notnull
-            => a.Count == b.Count && a.All(kv => b.TryGetValue(kv.Key, out var bv) && Equals(kv.Value, bv));
-        private static bool ObjectEqual(object? a, object? b)
-        {
-            if (ReferenceEquals(a, b)) return true;
-            if (a is null || b is null) return false;
-            if (a.GetType() != b.GetType()) return false;
-            return a switch
-            {
-                string sa => sa == (string)b!,
-                Address aa => AddressEqual(aa, (Address)b!),
-                _ => a.Equals(b)
-            };
-        }
-        private static bool DynamicEqual(IDictionary<string, object?> a, IDictionary<string, object?> b)
-            => a.Count == b.Count && a.All(kv => b.TryGetValue(kv.Key, out var bv) && ObjectEqual(kv.Value, bv));
-    }
-
-    [MemoryDiagnoser]
-    [PlainExporter]
-    public class MidGraphBenchmarks
+    public static WithPolymorph_Extra MakePoly(int n, int variantCount)
     {
-        [Params(40)] public int Customers;
-        [Params(3)] public int OrdersPerCustomer;
-        [Params(4)] public int LinesPerOrder;
-
-        private MidGraph _eqA = null!;
-        private MidGraph _eqB = null!;
-        private MidGraph _neqShallowA = null!;
-        private MidGraph _neqShallowB = null!;
-        private MidGraph _neqDeepA = null!;
-        private MidGraph _neqDeepB = null!;
-
-        private CompareLogic _cno = null!;
-        private ObjectsComparer.Comparer<MidGraph> _objComp = null!;
-
-        [GlobalSetup]
-        public void Setup()
-        {
-            _eqA = MidGraphFactory.Create(Customers, OrdersPerCustomer, LinesPerOrder, seed: 11);
-            _eqB = MidGraphFactory.Create(Customers, OrdersPerCustomer, LinesPerOrder, seed: 11);
-
-            _neqShallowA = MidGraphFactory.Create(Customers, OrdersPerCustomer, LinesPerOrder, seed: 22);
-            _neqShallowB = MidGraphFactory.Create(Customers, OrdersPerCustomer, LinesPerOrder, seed: 22);
-            _neqShallowB.Title += "-DIFF";
-
-            _neqDeepA = MidGraphFactory.Create(Customers, OrdersPerCustomer, LinesPerOrder, seed: 33);
-            _neqDeepB = MidGraphFactory.Create(Customers, OrdersPerCustomer, LinesPerOrder, seed: 33);
-            var lastC = _neqDeepB.Customers[^1];
-            var lastO = lastC.Orders[^1];
-            lastO.Lines[^1].Qty += 1;
-
-            _cno = new CompareLogic(new ComparisonConfig
+        var w = new WithPolymorph_Extra();
+        for (int i = 0; i < n; i++)
+            w.Payload.Add((i % variantCount) switch
             {
-                MaxDifferences = 1,
-                Caching = true,
-                IgnoreObjectTypes = false
+                0 => new PolyA_Extra { A = "a" + i },
+                1 => new PolyB_Extra { B = i },
+                _ => new PolyC_Extra { C = Guid.Empty }
             });
+        return w;
+    }
 
-            _objComp = new ObjectsComparer.Comparer<MidGraph>();
+    public static WithBigStrings_Extra MakeBig(int n, int bytesPerString)
+    {
+        string big = new string('x', Math.Max(1, bytesPerString));
+        return new WithBigStrings_Extra
+        {
+            Lines = Enumerable.Range(0, n).Select(i => new BigStr_Extra
+            {
+                Key = "K" + i,
+                Extra = big + i
+            }).ToList()
+        };
+    }
+
+    public static DirtyTracked_Extra MakeDirty(int nList)
+        => new DirtyTracked_Extra { A = 1, B = 2, L = Enumerable.Range(0, nList).ToList() };
+}
+
+
+// ===============================================================
+// === EXTRA BENCHMARKS (appended) ===============================
+// ===============================================================
+
+[MemoryDiagnoser]
+public class ExtraEqualityBenches
+{
+    [Params(50, 200, 500)] public int Customers;
+    [Params(1, 3, 8)] public int LinesPerOrder;
+
+    private CustOrdered_Extra _orderedA = default!;
+    private CustOrdered_Extra _orderedB = default!;
+    private CustUnordered_Extra _unorderedA = default!;
+    private CustUnordered_Extra _unorderedB = default!;
+    private ComparisonContext _ctx = default!;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        _orderedA = GenX_Extra.MakeOrdered(Customers, ordersPerCustomer: 1, linesPerOrder: LinesPerOrder);
+        _orderedB = GenX_Extra.MakeOrdered(Customers, ordersPerCustomer: 1, linesPerOrder: LinesPerOrder);
+
+        _unorderedA = GenX_Extra.MakeUnordered(ordersPerCustomer: 1, linesPerOrder: LinesPerOrder, shuffleRight: false);
+        _unorderedB = GenX_Extra.MakeUnordered(ordersPerCustomer: 1, linesPerOrder: LinesPerOrder, shuffleRight: true);
+
+        _ctx = new ComparisonContext(new ComparisonOptions
+        {
+            StringComparison = StringComparison.Ordinal,
+            TreatNaNEqual = true
+        });
+
+        // pre-touch to avoid first-call warmup spikes
+        _ = _orderedA.AreDeepEqual(_orderedB, _ctx);
+        _ = _unorderedA.ComputeDeepDelta(_unorderedB, _ctx);
+    }
+
+    [Benchmark(Description = "Ordered seq equality (equal fast path)")]
+    public bool Ordered_AreDeepEqual()
+        => _orderedA.AreDeepEqual(_orderedB, _ctx);
+
+    [Benchmark(Description = "Unordered seq equality w/ keys (same set, different order)")]
+    public bool UnorderedWithKeys_AreDeepEqual()
+        => _unorderedA.AreDeepEqual(_unorderedB, _ctx);
+}
+
+[MemoryDiagnoser]
+public class ExtraArrayVsListBenches
+{
+    [Params(100, 1_000, 10_000)] public int N;
+
+    private WithList_Extra _listA = default!;
+    private WithList_Extra _listB = default!;
+    private WithArray_Extra _arrA = default!;
+    private WithArray_Extra _arrB = default!;
+    private ComparisonContext _ctx = default!;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        _listA = GenX_Extra.MakeList(N);
+        _listB = GenX_Extra.MakeList(N);
+        _arrA = GenX_Extra.MakeArray(N);
+        _arrB = GenX_Extra.MakeArray(N);
+        if (N > 0) _arrB.Lines[N / 2].V++; // small change
+        _ctx = new ComparisonContext();
+
+        _ = _listA.AreDeepEqual(_listB, _ctx);
+        _ = _arrA.ComputeDeepDelta(_arrB, _ctx);
+    }
+
+    [Benchmark(Description = "List equality (ordered)")]
+    public bool List_Equal() => _listA.AreDeepEqual(_listB, _ctx);
+
+    [Benchmark(Description = "Array equality (ordered)")]
+    public bool Array_Equal() => _arrA.AreDeepEqual(_arrB, _ctx);
+
+    [Benchmark(Description = "List ComputeDelta (granular seq ops)")]
+    public DeltaDocument List_ComputeDelta()
+        => _listA.ComputeDeepDelta(_listB, _ctx);
+
+    [Benchmark(Description = "Array ComputeDelta (replace-on-change)")]
+    public DeltaDocument Array_ComputeDelta()
+        => _arrA.ComputeDeepDelta(_arrB, _ctx);
+}
+
+[MemoryDiagnoser]
+public class ExtraPolymorphicBenches
+{
+    [Params(100, 1_000, 5_000)] public int N;
+    [Params(2, 3)] public int VariantCount;
+
+    private WithPolymorph_Extra _left = default!;
+    private WithPolymorph_Extra _right = default!;
+    private ComparisonContext _ctx = default!;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        _left = GenX_Extra.MakePoly(N, VariantCount);
+        _right = GenX_Extra.MakePoly(N, VariantCount);
+        if (_right.Payload.Count > 0) _right.Payload[0] = new PolyC_Extra { C = Guid.NewGuid() };
+        _ctx = new ComparisonContext();
+
+        _ = _left.AreDeepEqual(_right, _ctx);
+        _ = _left.ComputeDeepDelta(_right, _ctx);
+    }
+
+    [Benchmark(Description = "Polymorphic equality (same type shapes)")]
+    public bool Poly_Equal() => _left.AreDeepEqual(_right, _ctx);
+
+    [Benchmark(Description = "Polymorphic ComputeDelta")]
+    public DeltaDocument Poly_ComputeDelta() => _left.ComputeDeepDelta(_right, _ctx);
+}
+
+[MemoryDiagnoser]
+public class ExtraDirtyBitBenches
+{
+    [Params(100, 1_000)] public int ListCount;
+
+    private DirtyTracked_Extra _before = default!;
+    private DirtyTracked_Extra _after = default!;
+    private ComparisonContext _ctxFast = default!;
+    private ComparisonContext _ctxValidate = default!;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        _before = GenX_Extra.MakeDirty(ListCount);
+        _after = GenX_Extra.MakeDirty(ListCount);
+
+        _after.A += 1;
+        for (int i = 0; i < Math.Min((int)10, (int)_after.L.Count); i++) _after.L[i]++;
+
+        _ctxFast = new ComparisonContext(new ComparisonOptions { ValidateDirtyOnEmit = false });
+        _ctxValidate = new ComparisonContext(new ComparisonOptions { ValidateDirtyOnEmit = true });
+
+        _ = _before.ComputeDeepDelta(_after, _ctxFast);
+    }
+
+    [Benchmark(Description = "ComputeDelta (DirtyTrack, fast emit)")]
+    public DeltaDocument Dirty_Compute_Fast()
+        => _before.ComputeDeepDelta(_after, _ctxFast);
+
+    [Benchmark(Description = "ComputeDelta (DirtyTrack, validate-on-emit)")]
+    public DeltaDocument Dirty_Compute_Validate()
+        => _before.ComputeDeepDelta(_after, _ctxValidate);
+}
+
+[MemoryDiagnoser]
+public class ExtraCodecBenches
+{
+    [Params(100, 1_000)] public int N;
+    [Params(16, 1024, 8192)] public int BytesPerString;
+
+    private WithBigStrings_Extra _left = default!;
+    private WithBigStrings_Extra _right = default!;
+    private DeltaDocument _doc = default!;
+    private ComparisonContext _ctx = default!;
+
+    private byte[] _bufHeaderless = Array.Empty<byte>();
+    private byte[] _bufHeaderful = Array.Empty<byte>();
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        _left = GenX_Extra.MakeBig(N, BytesPerString);
+        _right = GenX_Extra.MakeBig(N, BytesPerString);
+        for (int i = 0; i < Math.Min(10, _right.Lines.Count); i++)
+            _right.Lines[i].Extra += "Δ";
+
+        _ctx = new ComparisonContext();
+        _doc = _left.ComputeDeepDelta(_right, _ctx);
+
+        var w1 = new ArrayBufferWriter<byte>(1024);
+        BinaryDeltaCodec.Write(_doc, w1, new BinaryDeltaOptions { IncludeHeader = false });
+        _bufHeaderless = w1.WrittenSpan.ToArray();
+
+        var w2 = new ArrayBufferWriter<byte>(1024);
+        BinaryDeltaCodec.Write(_doc, w2, new BinaryDeltaOptions { IncludeHeader = true });
+        _bufHeaderful = w2.WrittenSpan.ToArray();
+    }
+
+    [Benchmark(Description = "Binary Encode (headerless)")]
+    public int Encode_Headerless()
+    {
+        var writer = new ArrayBufferWriter<byte>(1024);
+        BinaryDeltaCodec.Write(_doc, writer, new BinaryDeltaOptions { IncludeHeader = false });
+        return writer.WrittenCount;
+    }
+
+    [Benchmark(Description = "Binary Encode (headerful + tables)")]
+    public int Encode_Headerful()
+    {
+        var writer = new ArrayBufferWriter<byte>(1024);
+        BinaryDeltaCodec.Write(_doc, writer, new BinaryDeltaOptions
+        {
+            IncludeHeader = true,
+            UseStringTable = true,
+            UseTypeTable = true,
+            IncludeEnumTypeIdentity = true
+        });
+        return writer.WrittenCount;
+    }
+
+    [Benchmark(Description = "Binary Decode (headerless)")]
+    public DeltaDocument Decode_Headerless()
+        => BinaryDeltaCodec.Read(_bufHeaderless, new BinaryDeltaOptions { IncludeHeader = false });
+
+    [Benchmark(Description = "Binary Decode (headerful)")]
+    public DeltaDocument Decode_Headerful()
+        => BinaryDeltaCodec.Read(_bufHeaderful, new BinaryDeltaOptions { IncludeHeader = true });
+}
+[DeepComparable(GenerateDelta = true)]
+public sealed class RoHolder { public IReadOnlyList<ValueLine_Extra> Lines { get; set; } = Array.AsReadOnly(Array.Empty<ValueLine_Extra>()); }
+
+[MemoryDiagnoser]
+public class ExtraApplyClonePathBenches
+{
+    [Params(1_000, 5_000)] public int Adds;
+
+    private WithList_Extra _targetList = default!;
+    private IReadOnlyList<ValueLine_Extra> _targetRo = default!;
+    private DeltaDocument _addsDoc = default!;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        _targetList = GenX_Extra.MakeList(0);
+        _targetRo = Array.AsReadOnly(Array.Empty<ValueLine_Extra>());
+
+        var doc = new DeltaDocument();
+        var w = new DeltaWriter(doc);
+        for (int i = 0; i < Adds; i++)
+            w.WriteSeqAddAt(memberIndex: 0, index: i, value: new ValueLine_Extra { V = i });
+        _addsDoc = doc;
+
+        _targetList = _targetList.ApplyDeepDelta(_addsDoc); // touch paths
+    }
+
+    //[Benchmark(Description = "ApplyDelta -> List<T> (in-place path, pre-sized)")]
+    //public int Apply_To_List()
+    //{
+    //    var t = new WithList_Extra { Lines = new List<ValueLine_Extra>() };
+    //    t = t.ApplyDeepDelta(_addsDoc);
+    //    return t.Lines.Count;
+    //}
+    [Benchmark(Description = "ApplyDelta -> IReadOnlyList<T> (clone path)")]
+    public int Apply_To_ReadOnlyList()
+    {
+        object? target = _targetRo; // IReadOnlyList<ValueLine_Extra>
+        var ops = new DeltaReader(_addsDoc).AsSpan();
+
+        // This helper handles RO → clone-to-List<T> and replays seq ops correctly
+        for (int i = 0; i < ops.Length; i++)
+            DeltaHelpers.ApplyListOpCloneIfNeeded<ValueLine_Extra>(ref target, in ops[i]);
+
+        var ro = (IReadOnlyList<ValueLine_Extra>)target!;
+        if (ro.Count != Adds) throw new InvalidOperationException("Delta not applied");
+        return ro.Count;
+    }
+
+}
+
+
+// ===============================================================
+// === DEV / QUICK CONFIG + ENTRYPOINT ===========================
+// ===============================================================
+
+public sealed class DevConfig : ManualConfig
+{
+    public DevConfig()
+    {
+        // Super-fast developer run to prevent “workload warmup” from dragging
+        AddJob(Job.ShortRun
+            .WithWarmupCount(1)
+            .WithIterationCount(5)
+            .WithLaunchCount(1)
+            .WithUnrollFactor(1)
+            .WithMinIterationTime(TimeInterval.FromMilliseconds(50))
+            .WithMaxRelativeError(0.05)
+            .WithId("DevShortRun"));
+
+        // Optional: in-process toolchain for super fast inner-loop (DEV ONLY!)
+        // Comment this out for final measurements.
+        AddJob(Job.ShortRun
+            .WithWarmupCount(1)
+            .WithIterationCount(5)
+            .WithLaunchCount(1)
+            .WithUnrollFactor(1)
+            .WithMinIterationTime(TimeInterval.FromMilliseconds(50))
+            .WithMaxRelativeError(0.05)
+            .WithToolchain(InProcessNoEmitToolchain.Instance)
+            .WithId("DevInProc"));
+    }
+}
+
+/// <summary>
+/// Apples-to-apples competitors for "apply N adds to a list" — no pre-serialization anywhere.
+/// Compares DeepEqual delta vs JsonPatchDocument vs Manual in-memory ops vs Immutable list path.
+/// </summary>
+[MemoryDiagnoser]
+public class Competitors_Adds_Benches
+{
+    [Params(100, 1_000, 5_000)]
+    public int Adds;
+
+    // Reuse your element type for parity
+    [DeepCompare]
+    public sealed class VLine { public int V { get; set; } }
+
+    // Simple strongly-typed holder used by all competitors
+    [DeepComparable(GenerateDiff = true, GenerateDelta = true)]
+    public sealed class Holder
+    {
+        public List<VLine> Lines { get; set; } = new();
+    }
+
+    // -------------------------
+    // Artifacts prebuilt in GlobalSetup (no serialization)
+    // -------------------------
+
+    // DeepEqual
+    public DeltaDocument _deepeqAddsDoc = default!;
+    public ComparisonContext _ctx = default!;
+
+    // JsonPatch
+    public JsonPatchDocument<Holder> _jsonPatchAdds = default!;
+
+    // Manual (naïve) ops
+    public struct AddOp { public int Index; public VLine Value; }
+    public List<AddOp> _manualAdds = default!;
+
+    // Immutable (builder-friendly form of the same ops)
+    private List<VLine> _immutableAddsValues = default!; // values in insertion order
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        // DeepEqual delta: build SeqAddAt ops in-memory
+        var doc = new DeltaDocument();
+        var w = new DeltaWriter(doc);
+        for (int i = 0; i < Adds; i++)
+            w.WriteSeqAddAt(memberIndex: 0, index: i, value: new VLine { V = i });
+        _deepeqAddsDoc = doc;
+        _ctx = new ComparisonContext();
+
+        // JsonPatch: build RFC6902-style "add" operations (no serialization)
+        var patch = new JsonPatchDocument<Holder>();
+        for (int i = 0; i < Adds; i++)
+        {
+            patch.Operations.Add(new Operation<Holder>(
+                op: "add",
+                path: $"/Lines/{i}",
+                from: null,
+                value: new VLine { V = i }
+            ));
+        }
+        _jsonPatchAdds = patch;
+
+        // Manual ops: strongly-typed list of (index, value)
+        _manualAdds = new List<AddOp>(Adds);
+        for (int i = 0; i < Adds; i++)
+            _manualAdds.Add(new AddOp { Index = i, Value = new VLine { V = i } });
+
+        // Immutable: just the values (we’ll Insert at index each time to mirror others)
+        _immutableAddsValues = new List<VLine>(Adds);
+        for (int i = 0; i < Adds; i++)
+            _immutableAddsValues.Add(new VLine { V = i });
+    }
+
+    // -------------------------
+    // BUILD (how expensive it is to AUTHOR the change set)
+    // -------------------------
+
+    [Benchmark(Description = "DeepEqual Build (adds doc)")]
+    public DeltaDocument DeepEqual_Build_AddsDoc()
+    {
+        var doc = new DeltaDocument();
+        var w = new DeltaWriter(doc);
+        for (int i = 0; i < Adds; i++)
+            w.WriteSeqAddAt(memberIndex: 0, index: i, value: new VLine { V = i });
+        return doc;
+    }
+
+    [Benchmark(Description = "JsonPatch Build (adds patch)")]
+    public JsonPatchDocument<Holder> JsonPatch_Build_AddsPatch()
+    {
+        var patch = new JsonPatchDocument<Holder>();
+        for (int i = 0; i < Adds; i++)
+        {
+            patch.Operations.Add(new Operation<Holder>(
+                op: "add",
+                path: $"/Lines/{i}",
+                from: null,
+                value: new VLine { V = i }
+            ));
+        }
+        return patch;
+    }
+
+    [Benchmark(Description = "Manual Build (adds ops)")]
+    public List<AddOp> Manual_Build_Adds()
+    {
+        var ops = new List<AddOp>(Adds);
+        for (int i = 0; i < Adds; i++)
+            ops.Add(new AddOp { Index = i, Value = new VLine { V = i } });
+        return ops;
+    }
+
+    [Benchmark(Description = "Immutable Build (values only)")]
+    public List<VLine> Immutable_Build_Values()
+    {
+        var vals = new List<VLine>(Adds);
+        for (int i = 0; i < Adds; i++)
+            vals.Add(new VLine { V = i });
+        return vals;
+    }
+
+    // -------------------------
+    // APPLY (apply the prebuilt change set to an empty target)
+    // -------------------------
+
+    [Benchmark(Description = "DeepEqual Apply (adds doc)")]
+    public int DeepEqual_Apply_AddsDoc()
+    {
+        var target = new Holder { Lines = new List<VLine>() };
+        target = target.ApplyDeepDelta(_deepeqAddsDoc);
+        return target.Lines.Count;
+    }
+
+    [Benchmark(Description = "JsonPatch Apply (adds patch)")]
+    public int JsonPatch_Apply_AddsPatch()
+    {
+        var target = new Holder { Lines = new List<VLine>() };
+        _jsonPatchAdds.ApplyTo(target);
+        return target.Lines.Count;
+    }
+
+    [Benchmark(Description = "Manual Apply (adds ops)")]
+    public int Manual_Apply_Adds()
+    {
+        var list = new List<VLine>(Adds);
+        // Insert at specified index to match the semantics of the other patches
+        // (here all indices are i, so this is effectively Append for our scenario)
+        for (int i = 0; i < _manualAdds.Count; i++)
+        {
+            var op = _manualAdds[i];
+            int idx = op.Index;
+            if ((uint)idx > (uint)list.Count) idx = list.Count; // clamp like others
+            if (idx == list.Count) list.Add(op.Value);
+            else list.Insert(idx, op.Value);
+        }
+        return list.Count;
+    }
+
+    [Benchmark(Description = "Immutable Apply (Insert)")]
+    public int Immutable_Apply_Insert()
+    {
+        var im = ImmutableList<VLine>.Empty;
+        for (int i = 0; i < _immutableAddsValues.Count; i++)
+        {
+            // Insert at i to mirror other competitors; this is intentionally expensive
+            im = im.Insert(i, _immutableAddsValues[i]);
+        }
+        return im.Count;
+    }
+}
+
+[MemoryDiagnoser]
+public class AccessTrackingSetterBenchmarks
+{
+    private readonly BaselineModel _baseline = new();
+    private readonly BitsBenchModel _bits = new();
+    private readonly CountsBenchModel _counts = new();
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        AccessTracking.Configure(
+            defaultMode: AccessMode.None,
+            defaultGranularity: AccessGranularity.Bits,
+            defaultLogCapacity: 0,
+            trackingEnabled: true,
+            countsEnabled: true,
+            lastEnabled: true,
+            logEnabled: true,
+            callersEnabled: true);
+    }
+
+    [Benchmark(Baseline = true, Description = "Setter (no tracking)")]
+    public int Baseline()
+    {
+        _baseline.Value++;
+        return _baseline.Value;
+    }
+
+    [Benchmark(Description = "Setter (bits)")]
+    public int Bits()
+    {
+        _bits.Value++;
+        return _bits.Value;
+    }
+
+    [Benchmark(Description = "Setter (counts+last)")]
+    public int Counts()
+    {
+        _counts.Value++;
+        return _counts.Value;
+    }
+
+    private sealed class BaselineModel
+    {
+        public int Value { get; set; }
+    }
+}
+
+public class Program
+{
+    public static void Main(string[] args)
+    {
+        var selection = args.Length == 0 ? new[] { "--filter", "*DeepEqualityBenchmarks*" } : args;
+        BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(selection);
+    }
+}
+
+
+
+
+[DeepComparable(GenerateDiff = true, GenerateDelta = true, StableMemberIndex = StableMemberIndexMode.Auto)]
+[DeltaTrack(AccessTrack = AccessMode.Write, AccessGranularity = AccessGranularity.Bits)]
+public partial class BitsBenchModel
+{
+    private int _value;
+    public int Value
+    {
+        get => _value;
+        set
+        {
+            _value = value;
+            __MarkDirty(__Bit_Value);
+        }
+    }
+}
+
+[DeepComparable(GenerateDiff = true, GenerateDelta = true, StableMemberIndex = StableMemberIndexMode.Auto)]
+[DeltaTrack(AccessTrack = AccessMode.Write, AccessGranularity = AccessGranularity.CountsAndLast)]
+public partial class CountsBenchModel
+{
+    private int _value;
+    public int Value
+    {
+        get => _value;
+        set
+        {
+            _value = value;
+            __MarkDirty(__Bit_Value);
+        }
+    }
+}
+// Tracked models (generator will inject the tracking hooks)
+[DeltaTrack(AccessTrack = AccessMode.Write, AccessGranularity = AccessGranularity.Bits)]
+public partial class TrackedBitsOrder
+{
+    // Tracking triggers on the SET; internal List<T>.Add wouldn't trigger tracking
+    public List<int> Lines { get; set; } = new();
+}
+
+[DeltaTrack(AccessTrack = AccessMode.Write, AccessGranularity = AccessGranularity.CountsAndLast)]
+public partial class TrackedCountsLastOrder
+{
+    public List<int> Lines { get; set; } = new();
+}
+
+// Plain baseline (no tracking)
+public class PlainOrder
+{
+    public List<int> Lines { get; set; } = new();
+}
+
+[MemoryDiagnoser]
+[HideColumns("Median", "Min", "Max")]
+public class AccessTrackingListBenchmarks
+{
+    // Size of the list we build/assign each iteration (replace-on-change pattern)
+    [Params(0, 8, 64, 512)]
+    public int N;
+
+    private PlainOrder _plain = default!;
+    private TrackedBitsOrder _bits = default!;
+    private TrackedCountsLastOrder _countsLast = default!;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        _plain = new PlainOrder();
+        _bits = new TrackedBitsOrder();
+        _countsLast = new TrackedCountsLastOrder();
+
+        // Optional: if your runtime needs callers enabled globally, uncomment:
+        // AccessTracking.Configure(trackingEnabled: true, callersEnabled: true);
+    }
+
+    // Helper: build a fresh list with N elements to simulate real work/allocations
+    private List<int> BuildList(int n)
+    {
+        var list = new List<int>(n);
+        for (int i = 0; i < n; i++) list.Add(i);
+        return list;
+    }
+
+    [Benchmark(Baseline = true, Description = "List replace (no tracking)")]
+    public void Plain_ListReplace()
+    {
+        _plain.Lines = BuildList(N);
+    }
+
+    [Benchmark(Description = "List replace (bits)")]
+    public void TrackedBits_ListReplace()
+    {
+        _bits.Lines = BuildList(N);
+    }
+
+    [Benchmark(Description = "List replace (counts+last)")]
+    public void TrackedCountsLast_ListReplace()
+    {
+        _countsLast.Lines = BuildList(N);
+    }
+
+    [Benchmark(Description = "List replace (counts+last + caller scope)")]
+    public void TrackedCountsLast_WithCallerScope_ListReplace()
+    {
+        using (AccessTracking.PushScope(label: "Benchmark.ReplaceList",
+               member: nameof(TrackedCountsLast_WithCallerScope_ListReplace),
+               file: "Benchmarks/AccessTrackingListBenchmarks.cs",
+               line: 0))
+        {
+            _countsLast.Lines = BuildList(N);
+        }
+    }
+}
+// -----------------------------
+// Baseline (no tracking)
+// -----------------------------
+public class PlainSubItem
+{
+    public string Label { get; set; } = string.Empty;
+    public int Level { get; set; }
+}
+
+public class PlainComplexModel
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public DateTime When { get; set; }
+    public decimal Price { get; set; }
+    public List<int> Lines { get; set; } = new();
+    public int[] Scores { get; set; } = Array.Empty<int>();
+    public Dictionary<string, int> Map { get; set; } = new();
+    public PlainSubItem Item { get; set; } = new();
+    public Guid Key { get; set; }
+    public byte[] Blob { get; set; } = Array.Empty<byte>();
+}
+
+// -----------------------------
+// Tracked (write-only; generator will inject hooks)
+// -----------------------------
+public class TrackedSubItem
+{
+    public string Label { get; set; } = string.Empty;
+    public int Level { get; set; }
+}
+
+// Counts+Last to stress the heavier path (bitset-only is cheaper; feel free to add that variant too)
+[DeepComparable(GenerateDelta = true, GenerateDiff = true)]
+[DeltaTrack(AccessTrack = AccessMode.Write, AccessGranularity = AccessGranularity.CountsAndLast)]
+public partial class TrackedComplexModel
+{
+    private int _id; public int Id { get => _id; set { _id = value; __MarkDirty(__Bit_Id); } }
+    private string _name = string.Empty; public string Name { get => _name; set { _name = value; __MarkDirty(__Bit_Name); } }
+    private DateTime _when; public DateTime When { get => _when; set { _when = value; __MarkDirty(__Bit_When); } }
+    private decimal _price; public decimal Price { get => _price; set { _price = value; __MarkDirty(__Bit_Price); } }
+
+    private List<int> _lines = new(); public List<int> Lines { get => _lines; set { _lines = value; __MarkDirty(__Bit_Lines); } }
+    private int[] _scores = Array.Empty<int>(); public int[] Scores { get => _scores; set { _scores = value; __MarkDirty(__Bit_Scores); } }
+    private Dictionary<string, int> _map = new(); public Dictionary<string, int> Map { get => _map; set { _map = value; __MarkDirty(__Bit_Map); } }
+
+    private TrackedSubItem _item = new(); public TrackedSubItem Item { get => _item; set { _item = value; __MarkDirty(__Bit_Item); } }
+    private Guid _key; public Guid Key { get => _key; set { _key = value; __MarkDirty(__Bit_Key); } }
+    private byte[] _blob = Array.Empty<byte>(); public byte[] Blob { get => _blob; set { _blob = value; __MarkDirty(__Bit_Blob); } }
+}
+[MemoryDiagnoser]
+[HideColumns("Median", "Min", "Max")]
+public class AccessTrackingComplexBenchmarks
+{
+    // Controls size of collections/blobs to simulate small vs large updates
+    [Params(0, 8, 64, 512, 4096)]
+    public int N;
+
+    // Toggle from→to event logging: 0 = off, 128 = on
+    [Params(0, 128)]
+    public int LogCap;
+
+    private PlainComplexModel _plain = default!;
+    private TrackedComplexModel _tracked = default!;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        // 1) Enable/disable logging per run (BDN re-calls Setup for each param combo)
+        AccessTracking.Configure(
+            defaultMode: AccessMode.Write,
+            defaultGranularity: AccessGranularity.CountsAndLast,
+            defaultLogCapacity: LogCap,   // 👈 drives event logging on/off
+            trackingEnabled: true,
+            countsEnabled: true,
+            lastEnabled: true,
+            logEnabled: true,
+            callersEnabled: true);
+
+        // 2) Force full snapshots to magnify the cost of value logging (no head/tail slices)
+        AccessTracking.ConfigureSnapshots(
+            snapshotModeDefault: ValueSnapshotMode.ScalarsAndStrings
+                               | ValueSnapshotMode.Collections
+                               | ValueSnapshotMode.Full,
+            collectionFullThreshold: int.MaxValue);
+
+        _plain = new PlainComplexModel();
+        _tracked = new TrackedComplexModel();
+    }
+
+    // Build a fresh set of values to assign to all 10 properties.
+    // Intent: replace-on-change to exercise the property setters (and thus write-tracking hook).
+    private (int id, string name, DateTime when, decimal price,
+             List<int> lines, int[] scores, Dictionary<string, int> map,
+             object item /*PlainSubItem|TrackedSubItem*/, Guid key, byte[] blob)
+    BuildData(int n, bool forTracked)
+    {
+        var id = Environment.TickCount; // cheap non-deterministic
+        var name = "order-" + id.ToString();
+        var when = DateTime.UtcNow;
+        var price = (decimal)(id & 0xFFFF) / 100m;
+
+        var lines = new List<int>(n);
+        for (int i = 0; i < n; i++) lines.Add(i);
+
+        var scores = new int[n];
+        for (int i = 0; i < n; i++) scores[i] = i ^ 0x5A;
+
+        var map = new Dictionary<string, int>(n);
+        for (int i = 0; i < n; i++) map["k" + i] = i * 3;
+
+        var key = Guid.NewGuid();
+
+        var blob = new byte[Math.Max(n, 0) * 4]; // 0, 32, 256, 2048 bytes
+        if (blob.Length > 0) new Random(id).NextBytes(blob);
+
+        object item = forTracked
+            ? new TrackedSubItem { Label = "L" + id, Level = (id & 7) }
+            : new PlainSubItem { Label = "L" + id, Level = (id & 7) };
+
+        return (id, name, when, price, lines, scores, map, item, key, blob);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AssignAll(PlainComplexModel m,
+        int id, string name, DateTime when, decimal price,
+        List<int> lines, int[] scores, Dictionary<string, int> map,
+        PlainSubItem item, Guid key, byte[] blob)
+    {
+        m.Id = id;
+        m.Name = name;
+        m.When = when;
+        m.Price = price;
+        m.Item = item;  // if you want to mutate Item too, copy fields instead of replacing
+        m.Key = key;
+
+        // List<int> Lines
+        if (m.Lines.Capacity < lines.Count) m.Lines.Capacity = lines.Count;
+        m.Lines.Clear();
+        m.Lines.AddRange(lines);
+
+        // int[] Scores
+        if (m.Scores.Length != scores.Length) m.Scores = new int[scores.Length];
+        Array.Copy(scores, m.Scores, scores.Length);
+
+        // Dictionary<string,int> Map
+        m.Map.Clear();
+        if (m.Map.Comparer.Equals(StringComparer.Ordinal)) // avoid reallocation; optional
+        {
+            foreach (var kv in map) m.Map[kv.Key] = kv.Value;
+        }
+        else
+        {
+            foreach (var kv in map) m.Map[kv.Key] = kv.Value;
         }
 
+        // byte[] Blob
+        if (m.Blob.Length != blob.Length) m.Blob = new byte[blob.Length];
+        if (blob.Length > 0) Buffer.BlockCopy(blob, 0, m.Blob, 0, blob.Length);
+    }
 
-        [Benchmark(Baseline = true)]
-        public bool Generated_Equal() => MidGraphDeepEqual.AreDeepEqual(_eqA, _eqB);
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AssignAll(TrackedComplexModel m,
+        int id, string name, DateTime when, decimal price,
+        List<int> lines, int[] scores, Dictionary<string, int> map,
+        TrackedSubItem item, Guid key, byte[] blob)
+    {
+        // 10 property writes (each should hit the write-tracker hook)
+        m.Id = id;
+        m.Name = name;
+        m.When = when;
+        m.Price = price;
+        m.Item = item;  // if you want to mutate Item too, copy fields instead of replacing
+        m.Key = key;
 
-        [Benchmark] public bool Manual_NonLinq_Equal() => ManualNonLinq.AreEqual(_eqA, _eqB);
-        [Benchmark] public bool Manual_Linqy_Equal() => ManualLinqy.AreEqual(_eqA, _eqB);
+        // List<int> Lines
+        if (m.Lines.Capacity < lines.Count) m.Lines.Capacity = lines.Count;
+        m.Lines.Clear();
+        m.Lines.AddRange(lines);
 
-        [Benchmark]
-        public bool Json_Newtonsoft_Equal()
+        // int[] Scores
+        if (m.Scores.Length != scores.Length) m.Scores = new int[scores.Length];
+        Array.Copy(scores, m.Scores, scores.Length);
+
+        // Dictionary<string,int> Map
+        m.Map.Clear();
+        if (m.Map.Comparer.Equals(StringComparer.Ordinal)) // avoid reallocation; optional
         {
-            var ja = JToken.FromObject(_eqA);
-            var jb = JToken.FromObject(_eqB);
-            return JToken.DeepEquals(ja, jb);
+            foreach (var kv in map) m.Map[kv.Key] = kv.Value;
+        }
+        else
+        {
+            foreach (var kv in map) m.Map[kv.Key] = kv.Value;
         }
 
-        [Benchmark]
-        public bool Json_SystemText_Equal()
+        // byte[] Blob
+        if (m.Blob.Length != blob.Length) m.Blob = new byte[blob.Length];
+        if (blob.Length > 0) Buffer.BlockCopy(blob, 0, m.Blob, 0, blob.Length);
+        m.__MarkDirty(TrackedComplexModel.__Bit_Lines);
+        m.__MarkDirty(TrackedComplexModel.__Bit_Scores);
+        m.__MarkDirty(TrackedComplexModel.__Bit_Map);
+        m.__MarkDirty(TrackedComplexModel.__Bit_Blob);
+    }
+
+    // -----------------------------
+    // Benchmarks
+    // -----------------------------
+
+    [Benchmark(Baseline = true, Description = "Set 10 props (no tracking)")]
+    public void Plain_SetAll()
+    {
+        var (id, name, when, price, lines, scores, map, item, key, blob) = BuildData(N, forTracked: false);
+        AssignAll(_plain, id, name, when, price, lines, scores, map, (PlainSubItem)item, key, blob);
+    }
+
+    [Benchmark(Description = "Set 10 props (tracking: counts+last)")]
+    public void Tracked_SetAll()
+    {
+        var (id, name, when, price, lines, scores, map, item, key, blob) = BuildData(N, forTracked: true);
+        AssignAll(_tracked, id, name, when, price, lines, scores, map, (TrackedSubItem)item, key, blob);
+    }
+
+    [Benchmark(Description = "Set 10 props (tracking + caller scope)")]
+    public void Tracked_WithCallerScope_SetAll()
+    {
+
+        using (AccessTracking.PushScope(
+            label: "Benchmark.SetAll",
+            member: nameof(Tracked_WithCallerScope_SetAll),
+            file: "Benchmarks/AccessTrackingComplexBenchmarks.cs",
+            line: 0))
         {
-            var sa = JsonSerializer.Serialize(_eqA);
-            var sb = JsonSerializer.Serialize(_eqB);
-            var na = JsonNode.Parse(sa)!;
-            var nb = JsonNode.Parse(sb)!;
-            return JsonNode.DeepEquals(na, nb);
-        }
-
-        [Benchmark]
-        public bool CompareNetObjects_Equal()
-            => _cno.Compare(_eqA, _eqB).AreEqual;
-
-        [Benchmark]
-        public bool ObjectsComparer_Equal()
-            => _objComp.Compare(_eqA, _eqB);
-
-        [Benchmark]
-        public bool FluentAssertions_Equal()
-        {
-            try { _eqA.Should().BeEquivalentTo(_eqB); return true; }
-            catch { return false; }
-        }
-
-        
-        [Benchmark] public bool Generated_NotEqual_Shallow() => MidGraphDeepEqual.AreDeepEqual(_neqShallowA, _neqShallowB);
-        [Benchmark] public bool Manual_NonLinq_NotEqual_Shallow() => ManualNonLinq.AreEqual(_neqShallowA, _neqShallowB);
-        [Benchmark] public bool Manual_Linqy_NotEqual_Shallow() => ManualLinqy.AreEqual(_neqShallowA, _neqShallowB);
-
-        [Benchmark]
-        public bool Json_Newtonsoft_NotEqual_Shallow()
-        {
-            var ja = JToken.FromObject(_neqShallowA);
-            var jb = JToken.FromObject(_neqShallowB);
-            return JToken.DeepEquals(ja, jb);
-        }
-
-        [Benchmark]
-        public bool Json_SystemText_NotEqual_Shallow()
-        {
-            var sa = JsonSerializer.Serialize(_neqShallowA);
-            var sb = JsonSerializer.Serialize(_neqShallowB);
-            var na = JsonNode.Parse(sa)!;
-            var nb = JsonNode.Parse(sb)!;
-            return JsonNode.DeepEquals(na, nb);
-        }
-
-        [Benchmark]
-        public bool CompareNetObjects_NotEqual_Shallow()
-            => _cno.Compare(_neqShallowA, _neqShallowB).AreEqual;
-
-        [Benchmark]
-        public bool ObjectsComparer_NotEqual_Shallow()
-            => _objComp.Compare(_neqShallowA, _neqShallowB);
-
-        [Benchmark]
-        public bool FluentAssertions_NotEqual_Shallow()
-        {
-            try { _neqShallowA.Should().BeEquivalentTo(_neqShallowB); return true; }
-            catch { return false; }
-        }
-
-        
-        [Benchmark] public bool Generated_NotEqual_Deep() => MidGraphDeepEqual.AreDeepEqual(_neqDeepA, _neqDeepB);
-        [Benchmark] public bool Manual_NonLinq_NotEqual_Deep() => ManualNonLinq.AreEqual(_neqDeepA, _neqDeepB);
-        [Benchmark] public bool Manual_Linqy_NotEqual_Deep() => ManualLinqy.AreEqual(_neqDeepA, _neqDeepB);
-
-        [Benchmark]
-        public bool Json_Newtonsoft_NotEqual_Deep()
-        {
-            var ja = JToken.FromObject(_neqDeepA);
-            var jb = JToken.FromObject(_neqDeepB);
-            return JToken.DeepEquals(ja, jb);
-        }
-
-        [Benchmark]
-        public bool Json_SystemText_NotEqual_Deep()
-        {
-            var sa = JsonSerializer.Serialize(_neqDeepA);
-            var sb = JsonSerializer.Serialize(_neqDeepB);
-            var na = JsonNode.Parse(sa)!;
-            var nb = JsonNode.Parse(sb)!;
-            return JsonNode.DeepEquals(na, nb);
-        }
-
-        [Benchmark]
-        public bool CompareNetObjects_NotEqual_Deep()
-            => _cno.Compare(_neqDeepA, _neqDeepB).AreEqual;
-
-        [Benchmark]
-        public bool ObjectsComparer_NotEqual_Deep()
-            => _objComp.Compare(_neqDeepA, _neqDeepB);
-
-        [Benchmark]
-        public bool FluentAssertions_NotEqual_Deep()
-        {
-            try { _neqDeepA.Should().BeEquivalentTo(_neqDeepB); return true; }
-            catch { return false; }
+            var (id, name, when, price, lines, scores, map, item, key, blob) = BuildData(N, forTracked: true);
+            AssignAll(_tracked, id, name, when, price, lines, scores, map, (TrackedSubItem)item, key, blob);
         }
     }
 }

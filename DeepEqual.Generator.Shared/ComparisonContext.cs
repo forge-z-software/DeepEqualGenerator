@@ -1,80 +1,245 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Text;
+using System.Text.Json;
 
 namespace DeepEqual.Generator.Shared;
 
+/// <summary>
+///     Holds options and traversal state for one comparison at a time.
+/// </summary>
 public sealed class ComparisonContext
 {
+    private const int LinearCycleTrackingLimit = 16;
     private readonly bool _tracking;
-    private readonly HashSet<RefPair> _visited;
-    private readonly Stack<RefPair> _stack;
+    private List<RefPair>? _activePairs;
+    private HashSet<RefPair>? _visited;
+    private DiagnosticState? _diagnostics;
 
-    public ComparisonOptions Options { get; }
+    public DeepMismatch? Mismatch => _diagnostics?.Mismatch;
+    public bool IsRecordingMismatch => _diagnostics is { SuppressionDepth: 0, Mismatch: null, Truncated: false };
+    public bool IsCollectingChanges => _diagnostics is { Changes: not null, SuppressionDepth: 0 };
 
-    public static ComparisonContext NoTracking { get; } = new(false, new ComparisonOptions());
+    public static ComparisonContext ForMismatch(ComparisonOptions? options, bool trackCycles = true) =>
+        new(trackCycles, options) { _diagnostics = new(0) };
 
-    public ComparisonContext() : this(true, new ComparisonOptions()) { }
-
-    public ComparisonContext(ComparisonOptions? options) : this(true, options ?? new ComparisonOptions()) { }
-
-    private ComparisonContext(bool enableTracking, ComparisonOptions? options)
+    public static ComparisonContext ForReport(ComparisonOptions? options, int maxChanges, bool trackCycles = true)
     {
-        _tracking = enableTracking;
-        Options = options ?? new ComparisonOptions();
-        if (_tracking)
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxChanges);
+        return new(trackCycles, options) { _diagnostics = new(maxChanges) };
+    }
+
+    public DeepChangeReport GetReport() => new(_diagnostics?.Changes?.ToArray() ?? [],
+        _diagnostics?.Fallbacks?.ToArray() ?? [], _diagnostics?.Truncated ?? false);
+
+    internal void RecordRuntimeFallback(Type type)
+    {
+        if (_diagnostics is not { Changes: not null, SuppressionDepth: 0 } state ||
+            (state.Fallbacks?.Count ?? 0) >= state.MaxChanges) return;
+        (state.Fallbacks ??= []).Add(new DeepComparisonFallback(FormatPath(), type.FullName ?? type.Name));
+    }
+
+    public PathScope AtMember(string name) =>
+        IsRecordingMismatch ? PushPath(new PathSegment(PathKind.Member, name)) : default;
+
+    public PathScope AtIndex(int index) =>
+        IsRecordingMismatch ? PushPath(new PathSegment(PathKind.Index, Index: index)) : default;
+
+    public PathScope AtKey<TKey>(TKey key) =>
+        IsRecordingMismatch ? PushPath(new PathSegment(PathKind.Key, key)) : default;
+
+    internal PathScope AtIndices(int[] indices) =>
+        IsRecordingMismatch ? PushPath(new PathSegment(PathKind.Indices, indices)) : default;
+
+    internal PathScope SuppressMismatch()
+    {
+        if (_diagnostics is null) return default;
+        _diagnostics.SuppressionDepth++;
+        return new PathScope(this, suppress: true);
+    }
+
+    public bool RecordMismatch<T>(T expected, T actual, DeepMismatchKind kind = DeepMismatchKind.Value)
+    {
+        if (_diagnostics is { SuppressionDepth: 0, Mismatch: null, Truncated: false } state)
         {
-            _visited = new HashSet<RefPair>(RefPair.Comparer.Instance);
-            _stack = new Stack<RefPair>();
+            if (state.Changes is null)
+            {
+                state.Mismatch = new DeepMismatch(FormatPath(), expected, actual, kind);
+            }
+            else if (state.Changes.Count < state.MaxChanges)
+            {
+                state.Changes.Add(new DeepMismatch(FormatPath(), expected, actual, kind));
+                return true;
+            }
+            else
+            {
+                state.Truncated = true;
+            }
         }
-        else
+        return false;
+    }
+
+    private string FormatPath()
+    {
+        var path = new StringBuilder("$");
+        foreach (var segment in _diagnostics!.Path) segment.AppendTo(path);
+        return path.ToString();
+    }
+
+    public bool RecordMemberMismatch<T>(string member, T expected, T actual)
+    {
+        if (!IsRecordingMismatch) return false;
+        using var path = AtMember(member);
+        return RecordMismatch(expected, actual);
+    }
+
+    private PathScope PushPath(PathSegment segment)
+    {
+        _diagnostics!.Path.Add(segment);
+        return new PathScope(this, suppress: false);
+    }
+
+    private sealed class DiagnosticState(int maxChanges)
+    {
+        internal readonly List<PathSegment> Path = [];
+        internal readonly List<DeepMismatch>? Changes = maxChanges == 0 ? null : [];
+        internal readonly int MaxChanges = maxChanges;
+        internal List<DeepComparisonFallback>? Fallbacks;
+        internal DeepMismatch? Mismatch;
+        internal int SuppressionDepth;
+        internal bool Truncated;
+    }
+
+    private enum PathKind
+    {
+        Member,
+        Index,
+        Key,
+        Indices
+    }
+
+    private readonly record struct PathSegment(PathKind Kind, object? Value = null, int Index = 0)
+    {
+        public void AppendTo(StringBuilder path)
         {
-            _visited = null!;
-            _stack = null!;
+            switch (Kind)
+            {
+                case PathKind.Member:
+                    path.Append('.').Append(Value);
+                    break;
+                case PathKind.Index:
+                    path.Append('[').Append(Index.ToString(CultureInfo.InvariantCulture)).Append(']');
+                    break;
+                case PathKind.Key:
+                    path.Append('[');
+                    if (Value is string key)
+                        path.Append('"').Append(JsonEncodedText.Encode(key).ToString()).Append('"');
+                    else
+                        path.Append(Value is null ? "null" : Convert.ToString(Value, CultureInfo.InvariantCulture));
+                    path.Append(']');
+                    break;
+                case PathKind.Indices:
+                    path.Append('[').Append(string.Join(",", (int[])Value!)).Append(']');
+                    break;
+            }
         }
     }
 
+    public readonly struct PathScope : IDisposable
+    {
+        private readonly ComparisonContext? _context;
+        private readonly bool _suppress;
+
+        internal PathScope(ComparisonContext context, bool suppress)
+        {
+            _context = context;
+            _suppress = suppress;
+        }
+
+        public void Dispose()
+        {
+            if (_context is null) return;
+            if (_suppress)
+                _context._diagnostics!.SuppressionDepth--;
+            else
+            {
+                var path = _context._diagnostics!.Path;
+                path.RemoveAt(path.Count - 1);
+            }
+        }
+    }
+
+    /// <summary>Creates a context with cycle tracking enabled and default options.</summary>
+    public ComparisonContext() : this(true, new ComparisonOptions())
+    {
+    }
+
+    /// <summary>Creates a context with cycle tracking enabled and explicit options.</summary>
+    public ComparisonContext(ComparisonOptions? options) : this(true, options ?? new ComparisonOptions())
+    {
+    }
+
+    internal ComparisonContext(bool trackCycles, ComparisonOptions? options)
+    {
+        _tracking = trackCycles;
+        Options = options ?? new ComparisonOptions();
+    }
+
+    public ComparisonOptions Options { get; }
+
+    /// <summary>A reusable context for models with no cycles and default options.</summary>
+    public static ComparisonContext NoTracking { get; } = new(false, null);
+
+    /// <summary>Begins comparing a reference pair, or reports that it is already on the current path.</summary>
     public bool Enter(object left, object right)
     {
-        if (!_tracking)
-        {
-            return true;
-        }
+        if (!_tracking) return true;
 
+        var active = _activePairs ??= new List<RefPair>(4);
         var pair = new RefPair(left, right);
-        if (!_visited.Add(pair))
+        if (_visited is null)
         {
-            return false;
+            foreach (var existing in active)
+                if (RefPair.Comparer.Instance.Equals(existing, pair)) return false;
+
+            if (active.Count == LinearCycleTrackingLimit)
+                _visited = new HashSet<RefPair>(active, RefPair.Comparer.Instance);
         }
 
-        _stack.Push(pair);
+        if (_visited is not null && !_visited.Add(pair)) return false;
+        active.Add(pair);
         return true;
     }
 
     public void Exit(object left, object right)
     {
-        if (!_tracking)
-        {
-            return;
-        }
-
-        if (_stack.Count == 0)
-        {
-            return;
-        }
-
-        var last = _stack.Pop();
-        _visited.Remove(last);
+        if (!_tracking || _activePairs is not { Count: > 0 } active) return;
+        _visited?.Remove(active[^1]);
+        active.RemoveAt(active.Count - 1);
     }
 
-    private readonly struct RefPair(object left, object right)
+    private readonly struct RefPair
     {
-        private readonly object _left = left;
-        private readonly object _right = right;
+        private readonly object _left;
+        private readonly object _right;
+
+        public RefPair(object left, object right)
+        {
+            _left = left;
+            _right = right;
+        }
 
         public sealed class Comparer : IEqualityComparer<RefPair>
         {
             public static readonly Comparer Instance = new();
-            public bool Equals(RefPair x, RefPair y) => ReferenceEquals(x._left, y._left) && ReferenceEquals(x._right, y._right);
+
+            public bool Equals(RefPair x, RefPair y)
+            {
+                return ReferenceEquals(x._left, y._left) && ReferenceEquals(x._right, y._right);
+            }
+
             public int GetHashCode(RefPair obj)
             {
                 unchecked
@@ -86,4 +251,39 @@ public sealed class ComparisonContext
             }
         }
     }
+}
+
+/// <summary>
+///     Strongly-typed structural diff for T.
+/// </summary>
+public readonly struct Diff<T> : IDiff
+{
+    public bool HasChanges { get; }
+    public bool IsReplacement { get; }
+    public T? NewValue { get; }
+    public IReadOnlyList<MemberChange>? MemberChanges { get; }
+
+    private Diff(bool has, bool replace, T? newValue, IReadOnlyList<MemberChange>? changes)
+    {
+        HasChanges = has;
+        IsReplacement = replace;
+        NewValue = newValue;
+        MemberChanges = changes;
+    }
+
+    public static Diff<T> Empty => new(false, false, default, null);
+
+    public static Diff<T> Replacement(T? newValue)
+    {
+        return new Diff<T>(true, true, newValue, null);
+    }
+
+    public static Diff<T> Members(List<MemberChange> changes)
+    {
+        if (changes.Count == 0) return Empty;
+
+        return new Diff<T>(true, false, default, changes);
+    }
+
+    public bool IsEmpty => !HasChanges;
 }
