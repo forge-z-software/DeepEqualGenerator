@@ -7,7 +7,7 @@ namespace DeepEqual.Generator;
 
 internal static class Diagnostics
 {
-    private const string RuleGuide = "https://github.com/Quaverflow/DeepEqualGenerator/blob/HEAD/docs/Diagnostics.md";
+    private const string RuleGuide = "https://github.com/forge-z-software/DeepEqualGenerator/blob/HEAD/docs/Diagnostics.md";
     private const string Category = "DeepEqual.Generator";
 
     internal static readonly DiagnosticDescriptor DL001 =

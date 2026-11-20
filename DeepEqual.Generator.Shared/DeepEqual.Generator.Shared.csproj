@@ -4,11 +4,11 @@
 		<PackageId>DeepEqual.Generator</PackageId>
 		<Version>2.3.0</Version>
 		<Authors>Mirko Sangrigoli</Authors>
-		<Company>Quaverflow</Company>
+		<Company>FORGE-Z Software</Company>
 		<Description>Source-generated deep equality, mismatch paths, structural diffs, and binary-serializable deltas for .NET models.</Description>
 		<PackageTags>deep-equality;source-generator;dotnet;diff</PackageTags>
 		<PackageReleaseNotes>Save side-by-side HTML comparison reports with path and change filters. Assertion failures carry the same redaction into their HTML reports. See the GitHub Actions example for uploading reports from failing tests.</PackageReleaseNotes>
-		<RepositoryUrl>https://github.com/Quaverflow/DeepEqualGenerator</RepositoryUrl>
+		<RepositoryUrl>https://github.com/forge-z-software/DeepEqualGenerator</RepositoryUrl>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 		<PackageReadmeFile>Readme.md</PackageReadmeFile>
 		<PackageIcon>icon.png</PackageIcon>
