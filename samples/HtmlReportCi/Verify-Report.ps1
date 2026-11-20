@@ -41,3 +41,6 @@ finally {
     if (Test-Path -LiteralPath $report) { Remove-Item -LiteralPath $report }
     if (Test-Path -LiteralPath $output) { Remove-Item -LiteralPath $output }
 }
+
+# The deliberately failing test leaves the native exit code set in the calling shell.
+exit 0
