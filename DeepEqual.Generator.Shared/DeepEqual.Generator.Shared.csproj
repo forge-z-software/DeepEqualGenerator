@@ -1,13 +1,13 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 	<PropertyGroup>
-		<TargetFramework>net8.0</TargetFramework>
+		<TargetFramework>net11.0</TargetFramework>
 		<PackageId>DeepEqual.Generator</PackageId>
-		<Version>2.3.0</Version>
+		<Version>3.0.0</Version>
 		<Authors>Mirko Sangrigoli</Authors>
 		<Company>FORGE-Z Software</Company>
 		<Description>Source-generated deep equality, mismatch paths, structural diffs, and binary-serializable deltas for .NET models.</Description>
 		<PackageTags>deep-equality;source-generator;dotnet;diff</PackageTags>
-		<PackageReleaseNotes>Save side-by-side HTML comparison reports with path and change filters. Assertion failures carry the same redaction into their HTML reports. See the GitHub Actions example for uploading reports from failing tests.</PackageReleaseNotes>
+		<PackageReleaseNotes>The runtime targets .NET 11. The NuGet package includes the source generator, code fixes, and runtime.</PackageReleaseNotes>
 		<RepositoryUrl>https://github.com/forge-z-software/DeepEqualGenerator</RepositoryUrl>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 		<PackageReadmeFile>Readme.md</PackageReadmeFile>
@@ -21,7 +21,6 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
 		<ProjectReference Include="..\DeepEqual.Generator\DeepEqual.Generator.csproj"
 			ReferenceOutputAssembly="false" PrivateAssets="all" />
 		<ProjectReference Include="..\DeepEqual.Generator.CodeFixes\DeepEqual.Generator.CodeFixes.csproj"

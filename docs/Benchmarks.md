@@ -1,8 +1,39 @@
 # Benchmarks
 
+## .NET 11 results (3.0.0)
+
+This run used SDK 11.0.100, runtime 11.0.0, and BenchmarkDotNet 0.16.0-preview.2 on Windows 11 with an Intel Core i9-10900K. Each case ran in a separate benchmark process with five warmup and ten measurement iterations. Times are means.
+
+| 128-line order | Handwritten comparison | Generated comparison | First mismatch report |
+| --- | ---: | ---: | ---: |
+| Equal | 613 ns | 457 ns | 1.68 µs |
+| Change on line 0 | 21.3 ns | 42.5 ns | 182 ns |
+| Change on line 127 | 511 ns | 466 ns | 1.82 µs |
+
+Both Boolean comparers allocated zero bytes in all three cases.
+
+| Operation | Mean | Allocated |
+| --- | ---: | ---: |
+| Match 128 reordered items by key | 14.85 µs | 24,272 B |
+| Compute a structured diff | 1.93 µs | 1,160 B |
+| Apply an existing delta | 135 ns | 0 B |
+| Encode a BDC1 delta | 834 ns | 1,520 B |
+| Decode a BDC1 delta | 439 ns | 920 B |
+
+The checked sync fixture changes eight dictionary entries. Timings exclude network and disk I/O.
+
+| Inventory entries | Full change report | Create verified patch | Receive verified patch |
+| ---: | ---: | ---: | ---: |
+| 128 | 7.53 µs | 90.9 µs | 73.7 µs |
+| 4,096 | 204 µs | 3.45 ms | 3.80 ms |
+
+The historical measurements used different benchmark settings. To isolate the effect of a runtime upgrade, rerun both versions with matching settings and workloads.
+
+## Historical .NET 8 results
+
 The release measurements below used .NET 8.0.33 on Windows 11 with an Intel Core i9-10900K. The fixtures verify their outputs before timing. Use the results to compare the measured workloads.
 
-## Comparison and reporting
+### Comparison and reporting
 
 The order fixture has 128 lines and two metadata entries. Both comparers check the same fields and short-circuit on the first mismatch.
 
@@ -14,7 +45,7 @@ The order fixture has 128 lines and two metadata entries. Both comparers check t
 
 Both Boolean comparers allocated zero bytes in these cases. Matching 128 reordered keyed lines took 16.21 µs and allocated 23.7 KB. The full report in the sync fixture took 8.58 µs for 128 entries and 222 µs for 4,096 entries, with approximately 4.2 KB allocated in each case.
 
-## State-verified sync in 2.2.0
+### State-verified sync in 2.2.0
 
 The paired comparison updates eight existing dictionary entries. It alternates builds of 2.1.0 and 2.2.0 in the same default-JIT session and reports the median of 18 measured batches per version. These measurements exclude network and disk I/O.
 
@@ -31,7 +62,7 @@ The paired comparison updates eight existing dictionary entries. It alternates b
 
 DES2 adds two digest fields totaling 64 bytes. The verified patch was 230 bytes for both fixtures. Verified snapshots were 2,444 and 87,996 bytes. The added CPU and allocations come from serializing, fingerprinting, and validating the complete state. The raw BDC1 format and its separate API remain available.
 
-## Checked sync versus full snapshot in 2.1.0
+### Checked sync versus full snapshot in 2.1.0
 
 Each fixture changes eight existing dictionary entries. The sender creates a checked patch or full snapshot. The receiver applies the patch to an isolated copy or deserializes the new snapshot. Times exclude network and disk I/O.
 
@@ -42,7 +73,7 @@ Each fixture changes eight existing dictionary entries. The sender creates a che
 
 The patch cut payload size by 14.3× and 530× in these fixtures. The checked patch spent more CPU on isolation, validation, and comparing the staged result. A fast local link and a low-cost snapshot can favor sending the whole model.
 
-## Existing patch and codec paths
+### Existing patch and codec paths
 
 Paired default-JIT runs alternated between builds of 2.0.1 and 2.1.0 on the same 128-entry workload. The patch application operation applies existing scalar and dictionary updates to the same target.
 
@@ -57,7 +88,7 @@ Paired default-JIT runs alternated between builds of 2.0.1 and 2.1.0 on the same
 
 Separate measurements showed timing drift. The diff rows use the focused paired repeat.
 
-## Consumer build cost
+### Consumer build cost
 
 Seven alternating Release rebuilds of the same OrderComparison sample took a median of 1.44 s with 2.0.1 and 1.28 s with 2.1.0. Restore was completed before timing. These measurements include the compiler and source generator. Windows scheduling produced substantial variation, so the build times are comparable at this scale.
 
