@@ -7,7 +7,7 @@ Compare .NET model snapshots with generated code. See what changed by property, 
 DeepEqualGenerator targets .NET 8 or later and requires a C# 12 compiler with Roslyn 4.11 or later. One NuGet package contains the generator, attributes, runtime, and IDE fixes.
 
 ```sh
-dotnet add package DeepEqual.Generator --version 2.1.0
+dotnet add package DeepEqual.Generator --version 2.2.0
 ```
 
 ```csharp

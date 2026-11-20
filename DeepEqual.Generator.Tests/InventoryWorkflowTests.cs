@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.ObjectModel;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using DeepEqual.Generator.Shared;
@@ -13,6 +14,10 @@ namespace DeepEqual;
 
 public sealed class InventoryWorkflowTests
 {
+    private const int SyncHeaderSize = 93;
+    private const int BaselineStateOffset = 29;
+    private const int ResultStateOffset = 61;
+
     [Fact]
     public void ReportUsesKeysAndContainsAllRelevantChanges()
     {
@@ -112,17 +117,220 @@ public sealed class InventoryWorkflowTests
         operations.Ops.Add(new DeltaOp(int.MaxValue, DeltaKind.SetMember, -1, null, "invalid", null));
         var bytes = new ArrayBufferWriter<byte>();
         BinaryDeltaCodec.Write(operations, bytes);
-        var invalid = new byte[29 + bytes.WrittenCount];
-        valid.Bytes.AsSpan(0, 29).CopyTo(invalid);
-        bytes.WrittenSpan.CopyTo(invalid.AsSpan(29));
+        var invalid = valid.Bytes[..SyncHeaderSize].Concat(bytes.WrittenSpan.ToArray()).ToArray();
         var result = sync.Apply(before, 1, invalid);
         Assert.Equal(DeepSyncStatus.InvalidOperation, result.Status);
         Assert.Same(before, result.Value);
         Assert.Equal("before", before.Name);
         Assert.Equal(1, before.Locations["A"]);
-        Assert.Equal(DeepSyncStatus.InvalidOperation, sync.Apply(before, 1, valid.Bytes.AsSpan(0, 30)).Status);
+        Assert.Equal(DeepSyncStatus.InvalidOperation, sync.Apply(before, 1, valid.Bytes.AsSpan(0, SyncHeaderSize + 1)).Status);
         BinaryPrimitives.WriteUInt64LittleEndian(invalid.AsSpan(4), sync.SchemaFingerprint ^ 1);
         Assert.Equal(DeepSyncStatus.SchemaMismatch, sync.Apply(before, 1, invalid).Status);
+    }
+
+    [Fact]
+    public void CorrectRevisionWithDriftedStateIsRejectedWithoutMutation()
+    {
+        var before = new WorkflowInventory { Name = "north", Locations = new() { ["A"] = 2, ["B"] = 5 } };
+        var after = new WorkflowInventory { Name = "north", Locations = new() { ["A"] = 3, ["B"] = 5 } };
+        var receiver = new WorkflowInventory { Name = "south", Locations = new() { ["A"] = 2, ["B"] = 5 } };
+        var sync = before.CreateDeepSync(InventoryJson.Default.WorkflowInventory);
+        var update = sync.CreateUpdate(before, after, 17, 18);
+        Assert.False(update.IsSnapshot);
+
+        var dryRun = sync.Preview(receiver, 17, update.Bytes);
+        var applied = sync.Apply(receiver, 17, update.Bytes);
+        Assert.Equal(DeepSyncStatus.StateMismatch, dryRun.Status);
+        Assert.Equal(dryRun, applied);
+        Assert.Same(receiver, applied.Value);
+        Assert.Equal(17, applied.Revision);
+        Assert.Equal("south", receiver.Name);
+        Assert.Equal(2, receiver.Locations["A"]);
+        after.AssertDeepEqual(sync.Apply(receiver, 17, sync.CreateSnapshot(after, 18).Bytes).Value);
+    }
+
+    [Fact]
+    public void ValidOperationsWithTheWrongResultAreRejectedAfterStaging()
+    {
+        var before = new WorkflowInventory { Name = "north", Locations = new() { ["A"] = 2 } };
+        var after = new WorkflowInventory { Name = "north", Locations = new() { ["A"] = 3 } };
+        var sync = before.CreateDeepSync(InventoryJson.Default.WorkflowInventory);
+        var update = sync.CreateUpdate(before, after, 7, 8);
+        var alternate = sync.CreateUpdate(before, new WorkflowInventory { Name = "north", Locations = new() { ["A"] = 9 } }, 7, 8);
+        var edited = update.Bytes[..SyncHeaderSize].Concat(alternate.Bytes[SyncHeaderSize..]).ToArray();
+        var result = sync.Apply(before, 7, edited);
+
+        Assert.Equal(DeepSyncStatus.StateMismatch, result.Status);
+        Assert.Contains("staged", result.Issue!.Message);
+        Assert.Same(before, result.Value);
+        Assert.Equal(7, result.Revision);
+        Assert.Equal(2, before.Locations["A"]);
+    }
+
+    [Fact]
+    public void StateVerificationAcceptsDifferentDictionaryInsertionOrder()
+    {
+        var before = new WorkflowInventory { Locations = new() { ["B"] = 2, ["A"] = 1 } };
+        var after = new WorkflowInventory { Locations = new() { ["A"] = 4, ["B"] = 2 } };
+        var copy = new WorkflowInventory { Locations = new() { ["A"] = 1, ["B"] = 2 } };
+        var sync = before.CreateDeepSync(InventoryJson.Default.WorkflowInventory);
+
+        var update = sync.CreateUpdate(before, after, 4, 5);
+        Assert.False(update.IsSnapshot);
+        var applied = sync.Apply(copy, 4, update.Bytes);
+        Assert.Equal(DeepSyncStatus.Applied, applied.Status);
+        after.AssertDeepEqual(applied.Value);
+        Assert.Equal(DeepSyncStatus.AlreadyApplied, sync.Apply(after, 5, update.Bytes).Status);
+        Assert.Equal(DeepSyncStatus.StateMismatch, sync.Apply(before, 5, update.Bytes).Status);
+    }
+
+    [Fact]
+    public void ComparingEqualDoesNotAllowAnIncorrectSerializedResult()
+    {
+        var before = new WorkflowInventory { Name = "north", Lines = [new("A", 1), new("B", 2)] };
+        var after = new WorkflowInventory { Name = "NORTH", Lines = [new("B", 2), new("A", 1)], Timestamp = 99 };
+        var options = new DeepSyncOptions
+        {
+            Profile = new ComparisonProfile("inventory", new() { StringComparison = StringComparison.OrdinalIgnoreCase })
+        };
+        var sync = before.CreateDeepSync(InventoryJson.Default.WorkflowInventory, options);
+        Assert.True(before.AreDeepEqual(after, options.Profile.Options));
+
+        var update = sync.CreateUpdate(before, after, 4, 5);
+        Assert.True(update.IsSnapshot);
+        Assert.NotNull(update.SnapshotReason);
+        var result = sync.Apply(before, 4, update.Bytes);
+        Assert.Equal(DeepSyncStatus.Applied, result.Status);
+        Assert.Equal(after.Name, result.Value!.Name);
+        Assert.Equal(after.Timestamp, result.Value.Timestamp);
+        Assert.Equal(after.Lines, result.Value.Lines);
+    }
+
+    [Fact]
+    public void NoOpStillChecksBaselineAndResult()
+    {
+        var before = new WorkflowInventory { Name = "north" };
+        var sync = before.CreateDeepSync(InventoryJson.Default.WorkflowInventory);
+        var update = sync.CreateUpdate(before, before, 10, 11);
+        Assert.False(update.IsSnapshot);
+        Assert.Empty(sync.Inspect(update.Bytes).Operations.Changes);
+        Assert.Same(before, sync.Apply(before, 10, update.Bytes).Value);
+        Assert.Equal(DeepSyncStatus.StateMismatch, sync.Apply(new WorkflowInventory(), 10, update.Bytes).Status);
+        update.Bytes[ResultStateOffset] ^= 1;
+        Assert.Equal(DeepSyncStatus.StateMismatch, sync.Apply(before, 10, update.Bytes).Status);
+    }
+
+    [Fact]
+    public void SnapshotsAndReplaysCheckTheResultState()
+    {
+        var before = new WorkflowInventory { Name = "north" };
+        var after = new WorkflowInventory { Name = "south" };
+        var sync = before.CreateDeepSync(InventoryJson.Default.WorkflowInventory);
+        var snapshot = sync.CreateSnapshot(after, 3);
+        Assert.Equal(DeepSyncStatus.AlreadyApplied, sync.Apply(after, 3, snapshot.Bytes).Status);
+        Assert.Equal(DeepSyncStatus.StateMismatch, sync.Apply(before, 3, snapshot.Bytes).Status);
+
+        var altered = snapshot.Bytes[..SyncHeaderSize].Concat(sync.CreateSnapshot(before, 3).Bytes[SyncHeaderSize..]).ToArray();
+        var rejected = sync.Apply(before, 1, altered);
+        Assert.Equal(DeepSyncStatus.StateMismatch, rejected.Status);
+        Assert.Same(before, rejected.Value);
+        Assert.Equal(1, rejected.Revision);
+        Assert.Null(sync.Apply(before, 1, sync.CreateSnapshot(null, 3).Bytes).Value);
+    }
+
+    [Fact]
+    public void PreviousWireVersionAndInvalidDigestFieldsAreRejected()
+    {
+        var before = new WorkflowInventory();
+        var sync = before.CreateDeepSync(InventoryJson.Default.WorkflowInventory);
+        var next = sync.CreateSnapshot(before, 2);
+        Assert.Equal("DES2"u8.ToArray(), next.Bytes[..4]);
+        var legacy = next.Bytes[..BaselineStateOffset].Concat(next.Bytes[SyncHeaderSize..]).ToArray();
+        legacy[3] = (byte)'1';
+        var rejected = sync.Apply(before, 1, legacy);
+        Assert.Equal(DeepSyncStatus.InvalidPacket, rejected.Status);
+        Assert.Contains("DES1", rejected.Issue!.Message);
+        next.Bytes[BaselineStateOffset] = 1;
+        Assert.Equal(DeepSyncStatus.InvalidPacket, sync.Apply(before, 1, next.Bytes).Status);
+    }
+
+    [Fact]
+    public void WireDigestIsSha256OfCanonicalSnapshotAndCountsTowardTheSizeLimit()
+    {
+        var value = new WorkflowInventory { Locations = new() { ["B"] = 2, ["A"] = 1 } };
+        var typeInfo = InventoryJson.Default.WorkflowInventory;
+        var snapshot = value.CreateDeepSync(typeInfo).CreateSnapshot(value, 3);
+        var canonical = """{"Lines":[],"Locations":{"A":1,"B":2},"Name":"","Timestamp":0}"""u8;
+        Assert.Equal(SHA256.HashData(canonical), snapshot.Bytes[ResultStateOffset..SyncHeaderSize]);
+
+        var exact = value.CreateDeepSync(typeInfo, new DeepSyncOptions { MaxPacketBytes = snapshot.Bytes.Length });
+        Assert.Equal(DeepSyncStatus.Applied, exact.Apply(value, 1, exact.CreateSnapshot(value, 3).Bytes).Status);
+        var tooSmall = value.CreateDeepSync(typeInfo, new DeepSyncOptions { MaxPacketBytes = snapshot.Bytes.Length - 1 });
+        Assert.Equal(DeepSyncStatus.InvalidPacket, tooSmall.Apply(value, 1, snapshot.Bytes).Status);
+        Assert.Throws<InvalidOperationException>(() => tooSmall.CreateSnapshot(value, 3));
+    }
+
+    [Fact]
+    public void CanonicalOrderingUsesOrdinalNamesForEscapedAndSupplementaryCharacters()
+    {
+        var value = new WorkflowInventory
+        {
+            Name = "Warehouse <north>",
+            Locations = new() { ["\uE000"] = 1, ["\U00010000"] = 2, ["a\nb"] = 3, ["z"] = 4 }
+        };
+        var pretty = new InventoryJson(new JsonSerializerOptions { WriteIndented = true });
+        var sync = value.CreateDeepSync(pretty.WorkflowInventory);
+        var message = sync.CreateSnapshot(value, 2);
+
+        var buffer = new ArrayBufferWriter<byte>();
+        using var writer = new Utf8JsonWriter(buffer);
+        writer.WriteStartObject();
+        writer.WriteStartArray("Lines");
+        writer.WriteEndArray();
+        writer.WriteStartObject("Locations");
+        foreach (var item in value.Locations.OrderBy(item => item.Key, StringComparer.Ordinal))
+            writer.WriteNumber(item.Key, item.Value);
+        writer.WriteEndObject();
+        writer.WriteString("Name", value.Name);
+        writer.WriteNumber("Timestamp", 0);
+        writer.WriteEndObject();
+        writer.Flush();
+        Assert.Equal(SHA256.HashData(buffer.WrittenSpan), message.Bytes[ResultStateOffset..SyncHeaderSize]);
+
+        var compact = value.CreateDeepSync(InventoryJson.Default.WorkflowInventory);
+        Assert.Equal(DeepSyncStatus.Applied, compact.Apply(null, 1, message.Bytes).Status);
+    }
+
+    [Fact]
+    public void JsonIgnoredStateCannotHideAComparedChangeFromVerification()
+    {
+        var before = new PartialSnapshotModel { Count = 1 };
+        var after = new PartialSnapshotModel { Count = 2 };
+        var sync = before.CreateDeepSync(InventoryJson.Default.PartialSnapshotModel);
+        var update = sync.CreateUpdate(before, after, 3, 4);
+        var drifted = new PartialSnapshotModel { Count = 1, ComparedButNotSerialized = 5 };
+        var result = sync.Apply(drifted, 3, update.Bytes);
+        Assert.Equal(DeepSyncStatus.StateMismatch, result.Status);
+        Assert.Same(drifted, result.Value);
+        Assert.Equal(3, result.Revision);
+        Assert.Equal(1, drifted.Count);
+        Assert.Throws<InvalidOperationException>(() => sync.CreateUpdate(before, drifted, 3, 4));
+
+        var invalidDelta = before.ComputeDeepDelta(new PartialSnapshotModel { Count = 2, ComparedButNotSerialized = 5 });
+        var buffer = new ArrayBufferWriter<byte>();
+        BinaryDeltaCodec.Write(invalidDelta, buffer);
+        var altered = update.Bytes[..SyncHeaderSize].Concat(buffer.WrittenSpan.ToArray()).ToArray();
+        Assert.Equal(DeepSyncStatus.StateMismatch, sync.Apply(before, 3, altered).Status);
+        Assert.Equal(0, before.ComparedButNotSerialized);
+    }
+
+    [Fact]
+    public void AmbiguousSerializedPropertyNamesCannotBeFingerprinted()
+    {
+        var before = new WorkflowInventory { Locations = new() { ["A"] = 1, ["a"] = 2 } };
+        var context = new InventoryJson(new JsonSerializerOptions { DictionaryKeyPolicy = JsonNamingPolicy.CamelCase });
+        var sync = before.CreateDeepSync(context.WorkflowInventory);
+        Assert.Throws<JsonException>(() => sync.CreateSnapshot(before, 3));
     }
 
     [Fact]
@@ -223,7 +431,7 @@ public sealed class InventoryWorkflowTests
         delta.Ops[set] = new DeltaOp(original.MemberIndex, original.Kind, original.Index, original.Key, -1, original.Nested);
         var buffer = new ArrayBufferWriter<byte>();
         BinaryDeltaCodec.Write(delta, buffer);
-        var corrupted = valid.Bytes[..29].Concat(buffer.WrittenSpan.ToArray()).ToArray();
+        var corrupted = valid.Bytes[..SyncHeaderSize].Concat(buffer.WrittenSpan.ToArray()).ToArray();
         var rejected = sync.Apply(before, 10, corrupted);
         Assert.Equal(DeepSyncStatus.InvalidOperation, rejected.Status);
         Assert.Same(before, rejected.Value);
@@ -355,8 +563,17 @@ public sealed class GuardedWorkflow
     }
 }
 
+[DeepComparable(GenerateDelta = true)]
+public sealed class PartialSnapshotModel
+{
+    public int Count { get; set; }
+    [JsonIgnore]
+    public int ComparedButNotSerialized { get; set; }
+}
+
 [JsonSerializable(typeof(WorkflowInventory))]
 [JsonSerializable(typeof(WorkflowLine))]
 [JsonSerializable(typeof(List<WorkflowLine>))]
 [JsonSerializable(typeof(GuardedWorkflow))]
+[JsonSerializable(typeof(PartialSnapshotModel))]
 internal partial class InventoryJson : JsonSerializerContext;

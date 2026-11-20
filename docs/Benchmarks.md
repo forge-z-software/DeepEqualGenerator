@@ -14,7 +14,24 @@ The order fixture has 128 lines and two metadata entries. Both comparers check t
 
 Both Boolean comparers allocated zero bytes in these cases. Matching 128 reordered keyed lines took 16.21 µs and allocated 23.7 KB. The full report in the sync fixture took 8.58 µs for 128 entries and 222 µs for 4,096 entries, with approximately 4.2 KB allocated in each case.
 
-## Checked sync versus full snapshot
+## State-verified sync in 2.2.0
+
+The paired comparison updates eight existing dictionary entries. It alternates builds of 2.1.0 and 2.2.0 in the same default-JIT session and reports the median of 18 measured batches per version. These measurements exclude network and disk I/O.
+
+| Entries | Operation | 2.1.0 | 2.2.0 | 2.1.0 allocation | 2.2.0 allocation |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 128 | Create patch | 40.3 µs | 164.1 µs | 26.7 KiB | 48.8 KiB |
+| 128 | Receive patch | 25.3 µs | 110.6 µs | 25.2 KiB | 44.9 KiB |
+| 128 | Create snapshot | 23.6 µs | 56.7 µs | 21.3 KiB | 24.0 KiB |
+| 128 | Receive snapshot | 14.7 µs | 49.1 µs | 16.6 KiB | 19.2 KiB |
+| 4,096 | Create patch | 1.48 ms | 6.19 ms | 751 KiB | 1,582 KiB |
+| 4,096 | Receive patch | 1.28 ms | 5.74 ms | 750 KiB | 1,495 KiB |
+| 4,096 | Create snapshot | 1.44 ms | 3.05 ms | 829 KiB | 917 KiB |
+| 4,096 | Receive snapshot | 0.72 ms | 2.33 ms | 658 KiB | 744 KiB |
+
+DES2 adds two digest fields totaling 64 bytes. The verified patch was 230 bytes for both fixtures. Verified snapshots were 2,444 and 87,996 bytes. The added CPU and allocations come from serializing, fingerprinting, and validating the complete state. The raw BDC1 format and its separate API remain available.
+
+## Checked sync versus full snapshot in 2.1.0
 
 Each fixture changes eight existing dictionary entries. The sender creates a checked patch or full snapshot. The receiver applies the patch to an isolated copy or deserializes the new snapshot. Times exclude network and disk I/O.
 

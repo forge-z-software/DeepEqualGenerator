@@ -19,7 +19,8 @@ public enum DeepSyncStatus
     StaleBaseline,
     SchemaMismatch,
     InvalidPacket,
-    InvalidOperation
+    InvalidOperation,
+    StateMismatch
 }
 
 public sealed record DeepSyncResult<T>(DeepSyncStatus Status, T? Value, long Revision, DeepPatchIssue? Issue = null)
@@ -43,8 +44,11 @@ public sealed class DeepSyncOptions
 /// <summary>Stages revisioned patches on isolated snapshots using generated model bindings.</summary>
 public sealed class DeepSync<T>
 {
-    private const uint Magic = 0x31534544; // DES1 in little-endian byte order.
-    private const int HeaderSize = 29;
+    private const uint LegacyMagic = 0x31534544; // DES1 in little-endian byte order.
+    private const uint Magic = 0x32534544; // DES2 in little-endian byte order.
+    private const int BaselineStateOffset = 29;
+    private const int ResultStateOffset = BaselineStateOffset + DeepSyncStateDigest.Size;
+    private const int HeaderSize = ResultStateOffset + DeepSyncStateDigest.Size;
     private const byte Patch = 0;
     private const byte Snapshot = 1;
     private readonly JsonTypeInfo<T> _snapshot;
@@ -101,6 +105,12 @@ public sealed class DeepSync<T>
         ArgumentOutOfRangeException.ThrowIfNegative(baselineRevision);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(revision, baselineRevision);
 
+        var desired = Serialize(after);
+        var desiredCopy = DeserializeFaithfulCopy(after, desired);
+        Span<byte> baselineState = stackalloc byte[DeepSyncStateDigest.Size];
+        Span<byte> resultState = stackalloc byte[DeepSyncStateDigest.Size];
+        ComputeDigest(desired, resultState);
+
         var delta = _equal(before, after, _comparison)
             ? DeltaDocument.ForRoot<T>()
             : _compute(before, after, new ComparisonContext(_deltaComparison));
@@ -113,12 +123,19 @@ public sealed class DeepSync<T>
 
             if (issue is null)
             {
+                var baseline = Serialize(before);
+                if (baseline.AsSpan().SequenceEqual(desired))
+                    resultState.CopyTo(baselineState);
+                else
+                    ComputeDigest(baseline, baselineState);
+                var copy = DeserializeFaithfulCopy(before, baseline);
                 BinaryDeltaCodec.Write(delta, buffer, _binary);
                 // Check the transmitted representation and the same apply path the receiver will use.
                 var encoded = BinaryDeltaCodec.Read(buffer.WrittenSpan, _binary);
-                var candidate = Stage(before, encoded);
-                if (!_equal(candidate, after, _comparison))
-                    issue = new("$", "The encoded patch did not reproduce the desired state.");
+                var candidate = Stage(before, copy, encoded);
+                if (!_equal(candidate, after, _comparison) ||
+                    !MatchesState(encoded.IsEmpty ? baseline : Serialize(candidate), resultState, desired))
+                    issue = new("$", "The encoded patch did not reproduce the desired snapshot state.");
             }
         }
         catch (Exception error) when (IsDataError(error))
@@ -128,45 +145,86 @@ public sealed class DeepSync<T>
 
         if (buffer.WrittenCount > _maxPacketBytes - HeaderSize)
             issue = new("$", "The patch exceeds the packet limit.");
-        if (issue is not null) return CreateSnapshot(after, revision, issue);
-        return WriteMessage(Patch, baselineRevision, revision, buffer.WrittenSpan);
+        if (issue is not null) return WriteSnapshot(desiredCopy, revision, desired, resultState, issue);
+        return WriteMessage(Patch, baselineRevision, revision, baselineState, resultState, buffer.WrittenSpan);
     }
 
-    public DeepSyncMessage CreateSnapshot(T? desired, long revision) => CreateSnapshot(desired, revision, null);
-
-    private DeepSyncMessage CreateSnapshot(T? desired, long revision, DeepPatchIssue? issue)
+    public DeepSyncMessage CreateSnapshot(T? desired, long revision)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(revision);
-        var payload = JsonSerializer.SerializeToUtf8Bytes(desired, (JsonTypeInfo)_snapshot);
-        var reconstructed = JsonSerializer.Deserialize(payload, _snapshot);
-        if (!_equal(desired, reconstructed, _comparison))
-            throw new InvalidOperationException("The configured snapshot serializer does not preserve the compared model state.");
-        return WriteMessage(Snapshot, -1, revision, payload, issue);
+        var payload = Serialize(desired);
+        Span<byte> resultState = stackalloc byte[DeepSyncStateDigest.Size];
+        ComputeDigest(payload, resultState);
+        return WriteSnapshot(DeserializeFaithfulCopy(desired, payload), revision, payload, resultState);
+    }
+
+    private DeepSyncMessage WriteSnapshot(T? reconstructed, long revision, byte[] payload, ReadOnlySpan<byte> resultState,
+        DeepPatchIssue? issue = null)
+    {
+        if (!MatchesState(Serialize(reconstructed), resultState, payload))
+            throw new InvalidOperationException("The configured snapshot serializer changes the state during a round trip.");
+        return WriteMessage(Snapshot, -1, revision, default, resultState, payload, issue);
     }
 
     /// <summary>Returns the candidate receiver state while leaving the supplied model untouched.</summary>
     public DeepSyncResult<T> Preview(T? current, long currentRevision, ReadOnlySpan<byte> packet)
     {
         if (!TryReadHeader(packet, out var header))
-            return new(DeepSyncStatus.InvalidPacket, current, currentRevision, new("$", "Invalid sync packet header or size."));
+        {
+            var message = packet.Length >= sizeof(uint) && BinaryPrimitives.ReadUInt32LittleEndian(packet) == LegacyMagic
+                ? "DES1 packets lack state verification. Upgrade both endpoints and send a new snapshot."
+                : "Invalid sync packet header or size.";
+            return new(DeepSyncStatus.InvalidPacket, current, currentRevision, new("$", message));
+        }
         if (header.Schema != SchemaFingerprint)
             return new(DeepSyncStatus.SchemaMismatch, current, currentRevision, new("$", "Model or comparison contract differs."));
-        if (header.Revision == currentRevision)
-            return new(DeepSyncStatus.AlreadyApplied, current, currentRevision);
-        if (header.Revision < currentRevision || header.Kind == Patch && header.Baseline != currentRevision)
+        if (header.Revision < currentRevision ||
+            (header.Revision != currentRevision && header.Kind == Patch && header.Baseline != currentRevision))
             return new(DeepSyncStatus.StaleBaseline, current, currentRevision,
                 new("$", $"The receiver is at revision {currentRevision}; the packet requires revision {header.Baseline}."));
 
         try
         {
+            var resultState = packet.Slice(ResultStateOffset, DeepSyncStateDigest.Size);
+            if (header.Revision == currentRevision)
+            {
+                var existing = Serialize(current);
+                if (!MatchesState(existing, resultState) || !PreservesState(current, existing))
+                    return StateMismatch(current, currentRevision, "The current revision contains a different state.");
+                return new(DeepSyncStatus.AlreadyApplied, current, currentRevision);
+            }
+
             var payload = packet[HeaderSize..];
             if (header.Kind == Snapshot)
-                return new(DeepSyncStatus.Applied, JsonSerializer.Deserialize(payload, _snapshot), header.Revision);
+            {
+                var snapshot = JsonSerializer.Deserialize(payload, _snapshot);
+                return MatchesState(Serialize(snapshot), resultState)
+                    ? new(DeepSyncStatus.Applied, snapshot, header.Revision)
+                    : StateMismatch(current, currentRevision, "The decoded snapshot does not match the expected state.");
+            }
 
+            var baseline = Serialize(current);
+            Span<byte> baselineState = stackalloc byte[DeepSyncStateDigest.Size];
+            ComputeDigest(baseline, baselineState);
+            if (!baselineState.SequenceEqual(packet.Slice(BaselineStateOffset, DeepSyncStateDigest.Size)))
+                return StateMismatch(current, currentRevision, "The receiver's state differs from the expected baseline.");
+
+            var copy = JsonSerializer.Deserialize(baseline, _snapshot);
+            if (!_equal(current, copy, _comparison))
+                return StateMismatch(current, currentRevision, "The snapshot serializer does not preserve the receiver's compared state.");
             var delta = BinaryDeltaCodec.Read(payload, _binary);
             var issue = _validator.Validate(typeof(T), current, delta);
             if (issue is not null) return new(DeepSyncStatus.InvalidOperation, current, currentRevision, issue);
-            return new(DeepSyncStatus.Applied, Stage(current, delta), header.Revision);
+            if (delta.IsEmpty)
+                return baselineState.SequenceEqual(resultState)
+                    ? new(DeepSyncStatus.Applied, current, header.Revision)
+                    : StateMismatch(current, currentRevision, "The empty patch does not reproduce the expected state.");
+
+            var candidate = Stage(current, copy, delta);
+            var staged = Serialize(candidate);
+            if (!MatchesState(staged, resultState) || !PreservesState(candidate, staged))
+                return StateMismatch(current, currentRevision, "The staged patch does not produce the expected state.");
+            return new(DeepSyncStatus.Applied, candidate, header.Revision);
         }
         catch (Exception error) when (IsDataError(error))
         {
@@ -174,6 +232,9 @@ public sealed class DeepSync<T>
                 new("$", "The payload could not be decoded or applied to an isolated snapshot."));
         }
     }
+
+    private static DeepSyncResult<T> StateMismatch(T? current, long revision, string message) =>
+        new(DeepSyncStatus.StateMismatch, current, revision, new("$", message));
 
     /// <summary>Produces the state and revision to commit together when application succeeds.</summary>
     public DeepSyncResult<T> Apply(T? current, long currentRevision, ReadOnlySpan<byte> packet) =>
@@ -244,17 +305,42 @@ public sealed class DeepSync<T>
         return null;
     }
 
-    private T? Stage(T? before, DeltaDocument document)
+    private T? Stage(T? original, T? copy, DeltaDocument document)
     {
-        if (document.IsEmpty) return before;
-        var copy = JsonSerializer.Deserialize(JsonSerializer.SerializeToUtf8Bytes(before, (JsonTypeInfo)_snapshot), _snapshot);
+        if (document.IsEmpty) return copy;
+        if (copy is not null && ReferenceEquals(original, copy))
+            throw new InvalidOperationException("The snapshot serializer must create an independent copy.");
         var issue = _validator.Validate(typeof(T), copy, document);
         if (issue is not null) throw new InvalidOperationException(issue.Message);
         return _apply(copy, document);
     }
 
-    private DeepSyncMessage WriteMessage(byte kind, long baseline, long revision, ReadOnlySpan<byte> payload,
-        DeepPatchIssue? issue = null)
+    private T? DeserializeFaithfulCopy(T? original, byte[] serialized)
+    {
+        var copy = JsonSerializer.Deserialize(serialized, _snapshot);
+        if (!_equal(original, copy, _comparison))
+            throw new InvalidOperationException("The configured snapshot serializer does not preserve the compared model state.");
+        return copy;
+    }
+
+    private bool PreservesState(T? original, byte[] serialized) =>
+        _equal(original, JsonSerializer.Deserialize(serialized, _snapshot), _comparison);
+
+    private byte[] Serialize(T? value) => JsonSerializer.SerializeToUtf8Bytes(value, (JsonTypeInfo)_snapshot);
+
+    private void ComputeDigest(byte[] serialized, Span<byte> destination) =>
+        DeepSyncStateDigest.Compute(serialized, _snapshot.Options.MaxDepth, destination);
+
+    private bool MatchesState(byte[] serialized, ReadOnlySpan<byte> expected, byte[]? knownState = null)
+    {
+        if (knownState is not null && serialized.AsSpan().SequenceEqual(knownState)) return true;
+        Span<byte> actual = stackalloc byte[DeepSyncStateDigest.Size];
+        ComputeDigest(serialized, actual);
+        return actual.SequenceEqual(expected);
+    }
+
+    private DeepSyncMessage WriteMessage(byte kind, long baseline, long revision, ReadOnlySpan<byte> baselineState,
+        ReadOnlySpan<byte> resultState, ReadOnlySpan<byte> payload, DeepPatchIssue? issue = null)
     {
         if (payload.Length > _maxPacketBytes - HeaderSize)
             throw new InvalidOperationException("The sync payload is larger than the configured packet limit.");
@@ -264,6 +350,8 @@ public sealed class DeepSync<T>
         BinaryPrimitives.WriteInt64LittleEndian(packet.AsSpan(12), baseline);
         BinaryPrimitives.WriteInt64LittleEndian(packet.AsSpan(20), revision);
         packet[28] = kind;
+        baselineState.CopyTo(packet.AsSpan(BaselineStateOffset, DeepSyncStateDigest.Size));
+        resultState.CopyTo(packet.AsSpan(ResultStateOffset, DeepSyncStateDigest.Size));
         payload.CopyTo(packet.AsSpan(HeaderSize));
         return new(packet, kind == Snapshot, issue);
     }
@@ -278,7 +366,9 @@ public sealed class DeepSync<T>
         var baseline = BinaryPrimitives.ReadInt64LittleEndian(packet[12..]);
         var revision = BinaryPrimitives.ReadInt64LittleEndian(packet[20..]);
         var kind = packet[28];
-        if (revision < 0 || (kind == Snapshot ? baseline != -1 : kind != Patch || baseline < 0 || revision <= baseline))
+        if (revision < 0 || (kind == Snapshot
+                ? baseline != -1 || packet.Slice(BaselineStateOffset, DeepSyncStateDigest.Size).ContainsAnyExcept((byte)0)
+                : kind != Patch || baseline < 0 || revision <= baseline))
             return false;
         header = new(schema, baseline, revision, kind);
         return true;

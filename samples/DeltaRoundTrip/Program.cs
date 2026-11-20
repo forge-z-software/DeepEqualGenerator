@@ -10,7 +10,7 @@ var original = new Inventory
 };
 var desired = new Inventory
 {
-    Warehouse = "NORTH",
+    Warehouse = "North",
     Lines = [new("SKU-9", 3), new("SKU-12", 1)],
     Locations = new() { ["A"] = 3, ["C"] = 1 }
 };
@@ -39,9 +39,19 @@ if (args is ["inspect", var capturedPath])
 
 if (args is ["apply", var patchPath])
 {
-    var restored = receiver.Apply(original, 17, File.ReadAllBytes(patchPath));
+    var reordered = new Inventory
+    {
+        Warehouse = original.Warehouse,
+        Lines = original.Lines,
+        Locations = new Dictionary<string, int>(original.Locations.Reverse())
+    };
+    var restored = receiver.Apply(reordered, 17, File.ReadAllBytes(patchPath));
     if (restored.Status != DeepSyncStatus.Applied)
-        throw new InvalidOperationException(restored.Issue?.Message ?? "Expected a new inventory revision.");
+    {
+        Console.Error.WriteLine(restored.Issue?.Message ?? "Expected a new inventory revision.");
+        Environment.ExitCode = 2;
+        return;
+    }
     desired.AssertDeepEqual(restored.Value, profile.Options);
     Console.WriteLine($"Verified captured patch at revision {restored.Revision}.");
     return;
@@ -58,10 +68,16 @@ desired.AssertDeepEqual(applied.Value, profile.Options);
 var stale = receiver.Apply(original, 16, update.Bytes);
 if (stale.Status != DeepSyncStatus.StaleBaseline)
     throw new InvalidOperationException("The sender should have produced a patch for revision 17.");
+var drifted = new Inventory { Warehouse = "South", Lines = original.Lines, Locations = original.Locations };
+var drift = receiver.Apply(drifted, 17, update.Bytes);
+if (drift.Status != DeepSyncStatus.StateMismatch || !ReferenceEquals(drift.Value, drifted) || drift.Revision != 17)
+    throw new InvalidOperationException("The receiver must reject state drift at the expected revision.");
 var snapshot = sender.CreateSnapshot(desired, 18);
 desired.AssertDeepEqual(receiver.Apply(original, 16, snapshot.Bytes).Value, profile.Options);
+desired.AssertDeepEqual(receiver.Apply(drifted, 17, snapshot.Bytes).Value, profile.Options);
 
 Console.WriteLine($"Applied revision {applied.Revision}. The stale receiver recovered from a full snapshot.");
+Console.WriteLine("State drift was rejected at revision 17 and recovered from a verified snapshot.");
 Console.WriteLine($"Patch {update.Bytes.Length} bytes, full snapshot {snapshot.Bytes.Length} bytes.");
 if (args is ["write", var outputPath])
     File.WriteAllBytes(outputPath, update.Bytes);
