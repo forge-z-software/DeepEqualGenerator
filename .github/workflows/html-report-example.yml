@@ -1,6 +1,8 @@
 name: HTML diff report example
 
 on:
+  push:
+    branches: [codex/verify-html-report-2.3.0]
   workflow_dispatch:
     inputs:
       demonstrate_failure:
@@ -24,7 +26,7 @@ jobs:
       - name: Run inventory tests
         id: tests
         env:
-          DEEPEQUAL_DEMO_MISMATCH: ${{ inputs.demonstrate_failure && '1' || '0' }}
+          DEEPEQUAL_DEMO_MISMATCH: ${{ (github.event_name == 'push' || inputs.demonstrate_failure) && '1' || '0' }}
           DEEPEQUAL_REPORT_DIRECTORY: ${{ github.workspace }}/artifacts/deep-equal
         run: dotnet test samples/HtmlReportCi -c Release --no-restore
       - name: Upload the failed comparison
